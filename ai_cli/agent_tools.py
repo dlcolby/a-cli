@@ -100,7 +100,23 @@ def write_file(root: Path, rel_path: str, content: str) -> str:
 def run_command(root: Path, command: str) -> str:
     try:
         proc = subprocess.run(
-            command, shell=True, cwd=root, capture_output=True, text=True, timeout=COMMAND_TIMEOUT_SECONDS
+            command,
+            shell=True,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=COMMAND_TIMEOUT_SECONDS,
+            # Never let the executed command inherit the real terminal's
+            # stdin (fd 0) — see architecture.md's "run_command inheriting
+            # stdin" note: a device trace showed the terminal's own read
+            # start failing with EBADF only after several run_command calls
+            # had already executed, with no other change in between. a-shell
+            # can't use real fork() (spike 4), so its subprocess.run/Popen
+            # implementation is necessarily some non-standard shim rather
+            # than fork+exec+dup2 — plausible it doesn't isolate stdin as
+            # cleanly as a real POSIX subprocess would. DEVNULL removes any
+            # path for that interaction regardless of the exact mechanism.
+            stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
         raise ToolError(f"Command timed out after {COMMAND_TIMEOUT_SECONDS}s: {command}")

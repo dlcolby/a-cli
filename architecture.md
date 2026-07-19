@@ -398,6 +398,38 @@ symptom, but it's still a hypothesis. If sessions still crash after enough
 turns with this in place, the "many kqueue create/destroy cycles" theory
 would need to be reconsidered.
 
+**The persistent-event-loop fix helped, but a new crash surfaced — with a
+different errno, pointing at `run_command` inheriting stdin (2026-07-19,
+seventh round-trip).** Progress: the session got through 7 confirmed prompts
+this time (vs. 5 before it crashed last round), and the crash was a
+*different* error — `OSError: [Errno 9] Bad file descriptor`, not the
+earlier `Errno 22`/`EINVAL`. Same call site (`vt100.py`'s `_attached_input`
+→ `loop.add_reader` → `selectors.py`'s `register`), but this time the fd
+itself had gone bad, not just failed to register. The key correlated
+variable across the two crashes isn't just "how many `prompt()` calls
+happened" — it's how many **`run_command` executions** had happened first:
+1 before the previous crash, 3 before this one (`ls -la`, `pwd`,
+`ls -la ... && find ...`, all executed and confirmed successfully before the
+4th confirmation's subsequent `prompt()` call died). `run_command`
+(`agent_tools.py`) called `subprocess.run(command, shell=True, cwd=root,
+capture_output=True, text=True, timeout=...)` with no `stdin=` argument,
+meaning the executed command **inherits the real terminal's stdin (fd 0)**
+by default. On a normal POSIX system that's harmless (fork() gives the child
+process its own independent file descriptor table pointing at the same
+open file description; the parent's fd is untouched regardless of what the
+child does with its copy) — but a-shell can't use real `fork()` at all
+(spike 4: it hangs the whole app), so whatever `subprocess.run`/`Popen`
+shim a-shell actually uses under the hood is necessarily something other
+than fork+exec+dup2, and it's plausible that shim doesn't isolate the
+child's stdin as cleanly as a real subprocess would — leaving fd 0 in a
+degraded state after enough uses, which the *next* `prompt_toolkit` read
+then discovers via `EBADF`. **Fix**: added `stdin=subprocess.DEVNULL` to the
+`subprocess.run()` call in `run_command()` — the executed command now never
+has a path to touch the real terminal fd at all, regardless of the exact
+mechanism a-shell uses to run it. Covered by
+`tests/test_agent_tools.py`'s `test_run_command_never_inherits_real_stdin`.
+**Not yet device-confirmed.**
+
 ## Known issues / open actions
 
 1. **`/mouse auto` mode does not reliably work — OPEN, unresolved after two fix attempts.** Goal: dynamically enable touch-tap completion selection only while a dropdown is visible, and native terminal scrollback the rest of the time (both rely on the same xterm mouse-tracking mode, so can't be on simultaneously).
@@ -408,7 +440,7 @@ would need to be reconsidered.
 2. **OneDrive `pickFolder` folder-selection is unsupported** — see dedicated section above. Working around it with a local folder; Graph API integration is the real fix, not started.
 3. **OpenAI provider path is implemented but not yet device-tested** — only the Anthropic path has been exercised live on the phone so far (`/model openai:...` and the OpenAI SSE parsing are covered by unit tests, not a real on-device call).
 4. **`/setup` conversational onboarding described in early planning was never built** (see Distribution note above) — not currently a gap the user has asked to fill, noted for completeness.
-5. **The actual root cause was broader than "tool confirmation" — an app-wide kqueue exhaustion pattern, now addressed — OPEN pending device confirmation.** Six device round-trips total. v1-v4 chased a nested-synchronous-read theory for the confirmation prompt specifically; the defer-to-next-turn rewrite (round 5) then crashed anyway, on a plain top-level `prompt()` call with no nesting at all, which reframed the whole investigation — see "The defer-to-next-turn fix crashed anyway" above. Fix (round 6): hold a single persistent `asyncio` event loop for the REPL's entire lifetime (`_main_async()` + `prompt_async()`) instead of one per turn, since the sync `.prompt()`'s per-call `asyncio.run()` (and the kqueue selector it creates and tears down each time) is the leading theory for a crash that scaled with session length. The confirmation-flow rewrite from round 5 is kept regardless — it's still a better design (no blocking mid-turn read at all) independent of whether it was the actual crash cause. Not yet re-tested on a real phone.
+5. **Terminal-input crash saga, seven device round-trips, converging on `run_command`'s stdin inheritance — OPEN pending device confirmation.** v1-v4 chased a nested-synchronous-read theory for the confirmation prompt specifically; round 5's defer-to-next-turn rewrite then crashed anyway on a plain top-level `prompt()` call with no nesting at all (`EINVAL`), reframing the investigation around `asyncio.run()`-per-call kqueue churn; round 6 held one persistent event loop for the REPL's lifetime, which helped (got through more turns) but round 7 still crashed — this time `EBADF`, correlated with how many `run_command` calls had executed beforehand rather than raw `prompt()` count. Fix (round 7): `run_command` now passes `stdin=subprocess.DEVNULL`, since it was inheriting the real terminal's stdin by default and a-shell's non-standard (fork-less) subprocess implementation plausibly doesn't isolate that as cleanly as real POSIX fork+exec would. All three fixes (defer-to-next-turn, persistent event loop, stdin isolation) are kept regardless of which one(s) turn out to matter — each is independently a reasonable design regardless of this specific bug. Not yet re-tested on a real phone.
 6. **Ordinary chat text triggered a completion dropdown on every keystroke — FIXED, 2026-07-19.** `FuzzyCompleter` matches a single typed character against any top-level command name by subsequence (e.g. "e" fuzzy-matches "/help", "/session", "/memory", ...), and `complete_while_typing=True` meant this fired on nearly every keystroke of plain chat text, not just slash commands. Fixed with `ui._SlashOnlyCompleter`, which only delegates to the real completer when the buffer starts with `/`. Not yet device-confirmed.
 7. **Project detection silently regressed after a fresh clone — FIXED, 2026-07-19.** `PROJECT_MARKERS` didn't include `.git`, only `AGENTS.md`/`CLAUDE.md`/`.opencode`/`mobile_sessions`. When the a-cli repo itself is used as a project under `bookmark_root`, it was only recognized as a project once `mobile_sessions/` already existed there from a prior session — but that dir is gitignored, so a fresh `lg2 clone` lost the marker, project detection silently fell back to "no project," and `read_file`/`write_file`/`run_command` then resolved paths against `bookmark_root` instead of the actual project directory (symptom: the model couldn't find `README.md` even though it existed, and tried to `find` for it — which itself then hit issue #5's confirmation freeze). Fixed by adding `.git` to `PROJECT_MARKERS`, matching OpenCode's own convention and not depending on ephemeral, gitignored state.
 

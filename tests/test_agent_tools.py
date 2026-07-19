@@ -60,6 +60,24 @@ def test_run_command_runs_in_root(tmp_path):
     assert "True" in result
 
 
+def test_run_command_never_inherits_real_stdin(tmp_path, monkeypatch):
+    # Regression: a device trace showed the terminal's own next read failing
+    # with EBADF only after several run_command calls had already executed,
+    # with no other change in between. a-shell can't use real fork() (spike
+    # 4), so its subprocess.run/Popen implementation is necessarily some
+    # non-standard shim -- explicitly isolating stdin removes any path for
+    # it to touch the real terminal fd, regardless of the exact mechanism.
+    captured = {}
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(agent_tools.subprocess, "run", fake_run)
+    agent_tools.run_command(tmp_path, "echo hi")
+    assert captured["stdin"] == subprocess.DEVNULL
+
+
 def test_run_command_timeout_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_tools, "COMMAND_TIMEOUT_SECONDS", 0.01)
 
