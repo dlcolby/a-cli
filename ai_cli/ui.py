@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import FuzzyCompleter, NestedCompleter, WordCompleter
+from prompt_toolkit.formatted_text import HTML
 
 from . import session as session_mod
 from .commands.loader import all_command_names
@@ -54,13 +55,13 @@ def _model_words(ctx) -> WordCompleter:
 def _session_words(ctx) -> WordCompleter:
     sessions = session_mod.list_sessions(ctx.cwd, ctx.bookmark_root)
     ids = [s["id"] for s in sessions]
-    # meta_dict shows the human-readable title alongside each id in the dropdown
-    # (e.g. picking up auto-naming/rename results) without changing what actually
-    # gets inserted into the buffer when you select it — matching stays id-based.
-    meta = {s["id"]: s["title"] for s in sessions}
-    # WORD=True treats the whole dash-separated id (timestamp-title-hash) as one
+    # display_dict shows "timestamp — title" in the dropdown (reflecting the
+    # CURRENT title, e.g. auto-naming/rename results) while still inserting
+    # the real id into the buffer when selected — matching stays id-based.
+    display = {s["id"]: session_mod.format_session_label(s["created_at"], s["title"]) for s in sessions}
+    # WORD=True treats the whole dash-separated id (timestamp-hash) as one
     # completable token instead of splitting on '-' as a word boundary.
-    return WordCompleter(ids, ignore_case=True, WORD=True, meta_dict=meta)
+    return WordCompleter(ids, ignore_case=True, WORD=True, display_dict=display)
 
 
 def build_completer(ctx) -> FuzzyCompleter:
@@ -99,16 +100,26 @@ class Repl_UI:
         """Fires on essentially every redraw (text/cursor/completion-state
         changes) — checked every time rather than assumed from a single
         event, since no single Buffer event reliably covers both a dropdown
-        appearing AND being dismissed. Only active in "auto" mode."""
+        appearing AND being dismissed. Only active in "auto" mode.
+
+        enable/disable_mouse_support() only APPEND the escape codes to the
+        output's internal write buffer (confirmed by reading vt100.py) —
+        they don't reach the real terminal until something calls flush().
+        Without an explicit flush() here, the toggle can sit queued and
+        never actually take effect, or take effect late/inconsistently
+        depending on unrelated render timing. Flushing immediately makes
+        the terminal state change happen when we intend it to."""
         if self.ctx.mouse_mode != "auto":
             return
         should_be_on = self.session.default_buffer.complete_state is not None
         if should_be_on == self._mouse_currently_on:
             return
+        output = self.session.app.output
         if should_be_on:
-            self.session.app.output.enable_mouse_support()
+            output.enable_mouse_support()
         else:
-            self.session.app.output.disable_mouse_support()
+            output.disable_mouse_support()
+        output.flush()
         self._mouse_currently_on = should_be_on
 
     def prompt(self, message: str = "> ") -> str:
@@ -120,11 +131,16 @@ class Repl_UI:
         # whichever fixed choice the user picked otherwise.
         base_mouse_support = self.ctx.mouse_mode == "on"
         self._mouse_currently_on = base_mouse_support
+        # Colored prompt marker so it's visually easy to spot where each user
+        # turn starts when scrolling back — done via HTML tags rather than raw
+        # ANSI, since this text goes through prompt_toolkit's own renderer.
+        colored_message = HTML(f"<ansicyan>{message}</ansicyan>")
         try:
-            return self.session.prompt(message, mouse_support=base_mouse_support)
+            return self.session.prompt(colored_message, mouse_support=base_mouse_support)
         finally:
             # Hard reset: guarantees scrollback works between turns in "auto"
             # mode even if some dismissal path didn't get caught above.
             if self.ctx.mouse_mode == "auto":
                 self.session.app.output.disable_mouse_support()
+                self.session.app.output.flush()
                 self._mouse_currently_on = False

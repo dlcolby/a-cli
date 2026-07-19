@@ -28,11 +28,24 @@ def test_mouse_dropdown_includes_auto(tmp_path):
     assert {"auto", "on", "off"} <= completions
 
 
-def test_session_switch_dropdown_shows_title_as_meta(tmp_path):
+def test_session_switch_dropdown_shows_timestamp_and_title(tmp_path):
     ctx = _make_ctx(tmp_path)
-    session_mod.create_session(ctx.cwd, ctx.bookmark_root, "anthropic", "sonnet", title="a real title", global_scope=True)
+    s = session_mod.create_session(
+        ctx.cwd, ctx.bookmark_root, "anthropic", "sonnet", title="a real title", global_scope=True
+    )
 
     completer = ui._session_words(ctx)
     completions = list(completer.get_completions(Document(""), None))
     assert len(completions) == 1
-    assert completions[0].display_meta_text == "a real title"
+    # The inserted text (on tap/selection) must still be the real id, for
+    # switch/rm matching — but the visible label shows timestamp + title,
+    # not the id's own (now title-free) hash suffix.
+    assert completions[0].text == s.id
+    assert "a real title" in completions[0].display_text
+    assert s.id not in completions[0].display_text
+
+
+def test_session_id_no_longer_bakes_in_title_slug(tmp_path):
+    ctx = _make_ctx(tmp_path)
+    s = session_mod.create_session(ctx.cwd, ctx.bookmark_root, "anthropic", "sonnet", global_scope=True)
+    assert "untitled" not in s.id

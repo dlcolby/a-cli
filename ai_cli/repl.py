@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from . import config as config_mod
+from . import colors, config as config_mod
 from . import memory, naming, session as session_mod, skills as skills_mod, ui
 from .commands import loader as command_loader
 from .commands.markdown_command import discover_commands
@@ -87,6 +87,7 @@ def send_turn(ctx: AppContext, user_text: str, override_model: Optional[str] = N
         assistant_text = []
         tool_calls: list[ToolCall] = []
 
+        print(colors.ASSISTANT, end="", flush=True)
         for event in ctx.provider.send(model, system_prompt(ctx), messages, tools=tools, stream=ctx.config.stream):
             if event.type == "text_delta":
                 print(event.text, end="", flush=True)
@@ -94,10 +95,10 @@ def send_turn(ctx: AppContext, user_text: str, override_model: Optional[str] = N
             elif event.type == "tool_call":
                 tool_calls.append(event.tool_call)
             elif event.type == "error":
-                print(f"\n[error] {event.error}")
+                print(f"{colors.RESET}\n{colors.wrap(f'[error] {event.error}', colors.ERROR)}")
                 return
 
-        print()  # newline after streamed text
+        print(colors.RESET)  # newline after streamed text, closing the color span
         if assistant_text:
             ctx.session.messages.append({"role": "assistant", "content": "".join(assistant_text)})
 
@@ -127,7 +128,7 @@ def send_turn(ctx: AppContext, user_text: str, override_model: Optional[str] = N
             )
             title = naming.suggest_title(ctx.provider, cheap_model, user_text, assistant_reply)
             ctx.session.title = title
-            print(f'[session auto-named: "{title}" — /session rename to change it]')
+            print(colors.wrap(f'[session auto-named: "{title}" — /session rename to change it]', colors.SYSTEM))
         except Exception:
             pass  # naming is best-effort; never let it break the chat turn
 

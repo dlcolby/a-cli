@@ -64,6 +64,16 @@ def test_global_session_visible_everywhere(tmp_path):
     assert s.id in from_root
 
 
+def test_format_session_label_combines_timestamp_and_title():
+    label = session_mod.format_session_label("2026-07-19T05:38:46+00:00", "a great title")
+    assert label == "2026-07-19 05:38 — a great title"
+
+
+def test_format_session_label_falls_back_on_bad_timestamp():
+    label = session_mod.format_session_label("not-a-timestamp", "a title")
+    assert label == "not-a-timestamp — a title"
+
+
 def test_format_transcript_empty(tmp_path):
     bookmark = tmp_path / "bookmark"
     bookmark.mkdir()
