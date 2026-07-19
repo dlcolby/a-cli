@@ -1,59 +1,65 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from ai_cli import ui
-from ai_cli.context import AppContext
 
 
-def _make_ctx(mouse_mode="auto"):
-    ctx = MagicMock(spec=AppContext)
-    ctx.mouse_mode = mouse_mode
-    return ctx
-
-
-def test_auto_mode_enables_mouse_when_completion_menu_open():
-    ctx = _make_ctx("auto")
+def _make_repl_ui(mouse_mode="auto", complete_state=None):
     repl_ui = ui.Repl_UI.__new__(ui.Repl_UI)  # bypass __init__ (needs a real terminal)
+    ctx = MagicMock()
+    ctx.mouse_mode = mouse_mode
     repl_ui.ctx = ctx
-
-    fake_app = MagicMock()
-    buf = MagicMock()
-    buf.complete_state = object()  # non-None means a dropdown is open
-
-    with patch("ai_cli.ui.get_app", return_value=fake_app):
-        repl_ui._on_completions_changed(buf)
-
-    fake_app.output.enable_mouse_support.assert_called_once()
-    fake_app.output.disable_mouse_support.assert_not_called()
+    repl_ui.session = MagicMock()
+    repl_ui.session.default_buffer.complete_state = complete_state
+    repl_ui._mouse_currently_on = False
+    return repl_ui
 
 
-def test_auto_mode_disables_mouse_when_completion_menu_closed():
-    ctx = _make_ctx("auto")
-    repl_ui = ui.Repl_UI.__new__(ui.Repl_UI)
-    repl_ui.ctx = ctx
+def test_auto_mode_enables_mouse_when_dropdown_open():
+    repl_ui = _make_repl_ui("auto", complete_state=object())
+    repl_ui._sync_mouse_state(repl_ui.session.app)
+    repl_ui.session.app.output.enable_mouse_support.assert_called_once()
+    repl_ui.session.app.output.disable_mouse_support.assert_not_called()
+    assert repl_ui._mouse_currently_on is True
 
-    fake_app = MagicMock()
-    buf = MagicMock()
-    buf.complete_state = None
 
-    with patch("ai_cli.ui.get_app", return_value=fake_app):
-        repl_ui._on_completions_changed(buf)
+def test_auto_mode_disables_mouse_when_dropdown_closes():
+    repl_ui = _make_repl_ui("auto", complete_state=None)
+    repl_ui._mouse_currently_on = True  # simulate it was on from a prior dropdown
+    repl_ui._sync_mouse_state(repl_ui.session.app)
+    repl_ui.session.app.output.disable_mouse_support.assert_called_once()
+    repl_ui.session.app.output.enable_mouse_support.assert_not_called()
+    assert repl_ui._mouse_currently_on is False
 
-    fake_app.output.disable_mouse_support.assert_called_once()
-    fake_app.output.enable_mouse_support.assert_not_called()
+
+def test_no_redundant_calls_when_state_unchanged():
+    repl_ui = _make_repl_ui("auto", complete_state=object())
+    repl_ui._mouse_currently_on = True  # already on, matches complete_state != None
+    repl_ui._sync_mouse_state(repl_ui.session.app)
+    repl_ui.session.app.output.enable_mouse_support.assert_not_called()
+    repl_ui.session.app.output.disable_mouse_support.assert_not_called()
 
 
 def test_fixed_modes_never_toggle_dynamically():
     for mode in ("on", "off"):
-        ctx = _make_ctx(mode)
-        repl_ui = ui.Repl_UI.__new__(ui.Repl_UI)
-        repl_ui.ctx = ctx
+        repl_ui = _make_repl_ui(mode, complete_state=object())
+        repl_ui._sync_mouse_state(repl_ui.session.app)
+        repl_ui.session.app.output.enable_mouse_support.assert_not_called()
+        repl_ui.session.app.output.disable_mouse_support.assert_not_called()
 
-        fake_app = MagicMock()
-        buf = MagicMock()
-        buf.complete_state = object()
 
-        with patch("ai_cli.ui.get_app", return_value=fake_app):
-            repl_ui._on_completions_changed(buf)
+def test_prompt_hard_resets_mouse_off_in_auto_mode_after_call():
+    repl_ui = _make_repl_ui("auto")
+    repl_ui.session.prompt.return_value = "hello"
+    with __import__("unittest.mock", fromlist=["patch"]).patch("ai_cli.ui.build_completer", return_value=None):
+        result = repl_ui.prompt()
+    assert result == "hello"
+    repl_ui.session.app.output.disable_mouse_support.assert_called_once()
+    assert repl_ui._mouse_currently_on is False
 
-        fake_app.output.enable_mouse_support.assert_not_called()
-        fake_app.output.disable_mouse_support.assert_not_called()
+
+def test_prompt_does_not_force_disable_in_fixed_on_mode():
+    repl_ui = _make_repl_ui("on")
+    repl_ui.session.prompt.return_value = "hello"
+    with __import__("unittest.mock", fromlist=["patch"]).patch("ai_cli.ui.build_completer", return_value=None):
+        repl_ui.prompt()
+    repl_ui.session.app.output.disable_mouse_support.assert_not_called()

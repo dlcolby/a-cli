@@ -11,12 +11,21 @@ state live: off while you're just typing (scrollback works), on for the brief
 window a completion dropdown is visible (tap-to-select works), off again once
 it closes. /mouse on|off overrides this with the old fixed behavior if the
 dynamic toggling turns out to be unreliable on a given device.
+
+Note on the dynamic toggle's implementation: Buffer.on_completions_changed
+only fires when a dropdown *appears* (prompt_toolkit's _set_completions is the
+only place that fires it) — selecting or cancelling a completion clears
+complete_state directly without firing that event. So this hooks the
+Application's on_invalidate event instead (fires on essentially every redraw
+-- text changes, cursor moves, completion state changes, all of it), and also
+force-disables mouse support in a finally block after every prompt() call as
+a hard reset, so a missed transition can't leave the terminal stuck in mouse
+mode between turns.
 """
 
 from __future__ import annotations
 
 from prompt_toolkit import PromptSession
-from prompt_toolkit.application import get_app
 from prompt_toolkit.completion import FuzzyCompleter, NestedCompleter, WordCompleter
 
 from . import session as session_mod
@@ -43,10 +52,15 @@ def _model_words(ctx) -> WordCompleter:
 
 
 def _session_words(ctx) -> WordCompleter:
-    ids = [s["id"] for s in session_mod.list_sessions(ctx.cwd, ctx.bookmark_root)]
+    sessions = session_mod.list_sessions(ctx.cwd, ctx.bookmark_root)
+    ids = [s["id"] for s in sessions]
+    # meta_dict shows the human-readable title alongside each id in the dropdown
+    # (e.g. picking up auto-naming/rename results) without changing what actually
+    # gets inserted into the buffer when you select it — matching stays id-based.
+    meta = {s["id"]: s["title"] for s in sessions}
     # WORD=True treats the whole dash-separated id (timestamp-title-hash) as one
     # completable token instead of splitting on '-' as a word boundary.
-    return WordCompleter(ids, ignore_case=True, WORD=True)
+    return WordCompleter(ids, ignore_case=True, WORD=True, meta_dict=meta)
 
 
 def build_completer(ctx) -> FuzzyCompleter:
@@ -64,7 +78,7 @@ def build_completer(ctx) -> FuzzyCompleter:
         "rename": None,
     }
     nested["/memory"] = {"append": None}
-    nested["/mouse"] = {"on": None, "off": None}
+    nested["/mouse"] = {"auto": None, "on": None, "off": None}
 
     return FuzzyCompleter(NestedCompleter.from_nested_dict(nested))
 
@@ -75,29 +89,42 @@ class Repl_UI:
     def __init__(self, ctx):
         self.ctx = ctx
         self.session = PromptSession(complete_while_typing=True)
-        self.session.default_buffer.on_completions_changed += self._on_completions_changed
+        self._mouse_currently_on = False
+        # PromptSession builds one Application in __init__ and reuses it for
+        # every prompt() call, so this handler stays attached for the REPL's
+        # whole lifetime, not just one turn.
+        self.session.app.on_invalidate += self._sync_mouse_state
 
-    def _on_completions_changed(self, buf) -> None:
-        """Live-toggle the terminal's actual mouse-reporting mode based on
-        whether a completion dropdown is currently showing. Only active in
-        "auto" mode — /mouse on|off bypasses this entirely."""
+    def _sync_mouse_state(self, app) -> None:
+        """Fires on essentially every redraw (text/cursor/completion-state
+        changes) — checked every time rather than assumed from a single
+        event, since no single Buffer event reliably covers both a dropdown
+        appearing AND being dismissed. Only active in "auto" mode."""
         if self.ctx.mouse_mode != "auto":
             return
-        try:
-            output = get_app().output
-        except Exception:
+        should_be_on = self.session.default_buffer.complete_state is not None
+        if should_be_on == self._mouse_currently_on:
             return
-        if buf.complete_state is not None:
-            output.enable_mouse_support()
+        if should_be_on:
+            self.session.app.output.enable_mouse_support()
         else:
-            output.disable_mouse_support()
+            self.session.app.output.disable_mouse_support()
+        self._mouse_currently_on = should_be_on
 
     def prompt(self, message: str = "> ") -> str:
         # Rebuild the completer each call since available models/sessions can
         # change between turns (e.g. after /session new).
         self.session.completer = build_completer(self.ctx)
         # Baseline mouse state for the whole prompt() call: off in "auto" (the
-        # completions-changed hook turns it on only while a dropdown is open),
-        # matching whichever fixed choice the user picked otherwise.
+        # dynamic hook turns it on only while a dropdown is open), matching
+        # whichever fixed choice the user picked otherwise.
         base_mouse_support = self.ctx.mouse_mode == "on"
-        return self.session.prompt(message, mouse_support=base_mouse_support)
+        self._mouse_currently_on = base_mouse_support
+        try:
+            return self.session.prompt(message, mouse_support=base_mouse_support)
+        finally:
+            # Hard reset: guarantees scrollback works between turns in "auto"
+            # mode even if some dismissal path didn't get caught above.
+            if self.ctx.mouse_mode == "auto":
+                self.session.app.output.disable_mouse_support()
+                self._mouse_currently_on = False
