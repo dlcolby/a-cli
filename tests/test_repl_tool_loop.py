@@ -35,9 +35,7 @@ def make_ctx(tmp_path, provider):
     )
 
 
-def test_read_file_tool_call_needs_no_confirmation(tmp_path, monkeypatch):
-    monkeypatch.setattr("builtins.input", lambda *a: (_ for _ in ()).throw(AssertionError("should not prompt")))
-
+def test_read_file_tool_call_needs_no_confirmation(tmp_path):
     provider = FakeProvider(
         [
             [StreamEvent(type="tool_call", tool_call=ToolCall(id="t1", name="read_file", input={"path": "f.txt"}))],
@@ -49,6 +47,7 @@ def test_read_file_tool_call_needs_no_confirmation(tmp_path, monkeypatch):
 
     repl.send_turn(ctx, "read the file")
 
+    assert ctx.pending_confirmation is None  # never needed to pause
     msgs = ctx.session.messages
     assert msgs[0] == {"role": "user", "content": "read the file"}
     assert msgs[1]["content"][0]["type"] == "tool_use"
@@ -60,9 +59,31 @@ def test_read_file_tool_call_needs_no_confirmation(tmp_path, monkeypatch):
     assert msgs[3] == {"role": "assistant", "content": "done"}
 
 
-def test_write_file_declined_is_not_written(tmp_path, monkeypatch):
-    monkeypatch.setattr("builtins.input", lambda *a: "n")
+def test_write_file_pauses_for_confirmation_instead_of_blocking(tmp_path):
+    # The whole point of the current design: send_turn() must never block for
+    # input mid-turn (five device round-trips of nested/synchronous reads all
+    # hung or crashed on-device). It pauses, storing resumable state, and
+    # returns control to the caller instead.
+    provider = FakeProvider(
+        [
+            [
+                StreamEvent(
+                    type="tool_call",
+                    tool_call=ToolCall(id="t1", name="write_file", input={"path": "out.txt", "content": "hi"}),
+                )
+            ],
+        ]
+    )
+    ctx = make_ctx(tmp_path, provider)
 
+    repl.send_turn(ctx, "write a file")
+
+    assert ctx.pending_confirmation is not None
+    assert not (ctx.bookmark_root / "out.txt").exists()
+    assert provider.calls == 1  # never made a second network call while paused
+
+
+def test_write_file_declined_is_not_written(tmp_path):
     provider = FakeProvider(
         [
             [
@@ -75,19 +96,44 @@ def test_write_file_declined_is_not_written(tmp_path, monkeypatch):
         ]
     )
     ctx = make_ctx(tmp_path, provider)
-
     repl.send_turn(ctx, "write a file")
 
+    repl.resume_pending_confirmation(ctx, "n")
+
+    assert ctx.pending_confirmation is None
     assert not (ctx.bookmark_root / "out.txt").exists()
     result_block = ctx.session.messages[2]["content"][0]
     assert result_block["is_error"] is True
-    assert "declined" in result_block["content"]
+    assert result_block["content"] == "User declined to run this tool call."
     assert ctx.session.messages[-1] == {"role": "assistant", "content": "ok, stopping"}
 
 
-def test_write_file_approved_writes_to_project_root(tmp_path, monkeypatch):
-    monkeypatch.setattr("builtins.input", lambda *a: "y")
+def test_declining_with_a_reason_passes_it_back_as_feedback(tmp_path):
+    # Anything other than a bare y/yes/n/no/empty reply is treated as a
+    # decline *with* feedback, so the user can redirect instead of just
+    # rejecting outright.
+    provider = FakeProvider(
+        [
+            [
+                StreamEvent(
+                    type="tool_call",
+                    tool_call=ToolCall(id="t1", name="run_command", input={"command": "find ."}),
+                )
+            ],
+            [StreamEvent(type="text_delta", text="ok, trying that instead")],
+        ]
+    )
+    ctx = make_ctx(tmp_path, provider)
+    repl.send_turn(ctx, "find the readme")
 
+    repl.resume_pending_confirmation(ctx, "no, use -maxdepth 2 instead")
+
+    result_block = ctx.session.messages[2]["content"][0]
+    assert result_block["is_error"] is True
+    assert result_block["content"] == "User declined to run this tool call and said: no, use -maxdepth 2 instead"
+
+
+def test_write_file_approved_writes_to_project_root(tmp_path):
     provider = FakeProvider(
         [
             [
@@ -100,17 +146,37 @@ def test_write_file_approved_writes_to_project_root(tmp_path, monkeypatch):
         ]
     )
     ctx = make_ctx(tmp_path, provider)
-
     repl.send_turn(ctx, "write a file")
 
+    repl.resume_pending_confirmation(ctx, "y")
+
+    assert ctx.pending_confirmation is None
     assert (ctx.bookmark_root / "out.txt").read_text(encoding="utf-8") == "hi"
     result_block = ctx.session.messages[2]["content"][0]
     assert "is_error" not in result_block
 
 
-def test_path_escape_attempt_is_reported_as_tool_error(tmp_path, monkeypatch):
-    monkeypatch.setattr("builtins.input", lambda *a: "y")
+def test_confirmation_reply_is_case_insensitive_and_trims_whitespace(tmp_path):
+    provider = FakeProvider(
+        [
+            [
+                StreamEvent(
+                    type="tool_call",
+                    tool_call=ToolCall(id="t1", name="write_file", input={"path": "out.txt", "content": "hi"}),
+                )
+            ],
+            [StreamEvent(type="text_delta", text="done")],
+        ]
+    )
+    ctx = make_ctx(tmp_path, provider)
+    repl.send_turn(ctx, "write a file")
 
+    repl.resume_pending_confirmation(ctx, "  YES  ")
+
+    assert (ctx.bookmark_root / "out.txt").read_text(encoding="utf-8") == "hi"
+
+
+def test_path_escape_attempt_is_reported_as_tool_error(tmp_path):
     provider = FakeProvider(
         [
             [
@@ -125,8 +191,9 @@ def test_path_escape_attempt_is_reported_as_tool_error(tmp_path, monkeypatch):
         ]
     )
     ctx = make_ctx(tmp_path, provider)
-
     repl.send_turn(ctx, "escape the sandbox")
+
+    repl.resume_pending_confirmation(ctx, "y")
 
     assert not (ctx.bookmark_root.parent / "escape.txt").exists()
     result_block = ctx.session.messages[2]["content"][0]
@@ -134,9 +201,41 @@ def test_path_escape_attempt_is_reported_as_tool_error(tmp_path, monkeypatch):
     assert "escapes" in result_block["content"]
 
 
-def test_session_round_trips_through_save_and_load(tmp_path, monkeypatch):
-    monkeypatch.setattr("builtins.input", lambda *a: "y")
+def test_multiple_tool_calls_in_one_round_only_pauses_for_the_confirm_needed_one(tmp_path):
+    # read_file executes immediately; write_file pauses. Order must be
+    # preserved in the eventual combined tool_result message.
+    provider = FakeProvider(
+        [
+            [
+                StreamEvent(
+                    type="tool_call", tool_call=ToolCall(id="t1", name="read_file", input={"path": "f.txt"})
+                ),
+                StreamEvent(
+                    type="tool_call",
+                    tool_call=ToolCall(id="t2", name="write_file", input={"path": "out.txt", "content": "hi"}),
+                ),
+            ],
+            [StreamEvent(type="text_delta", text="done")],
+        ]
+    )
+    ctx = make_ctx(tmp_path, provider)
+    (ctx.bookmark_root / "f.txt").write_text("hello", encoding="utf-8")
 
+    repl.send_turn(ctx, "read then write")
+
+    assert ctx.pending_confirmation is not None
+    assert ctx.pending_confirmation["remaining_tool_calls"][0].id == "t2"
+    assert ctx.pending_confirmation["result_blocks"][0]["content"] == "hello"  # read_file already ran
+
+    repl.resume_pending_confirmation(ctx, "y")
+
+    result_blocks = ctx.session.messages[2]["content"]
+    assert result_blocks[0]["content"] == "hello"
+    assert "is_error" not in result_blocks[1]
+    assert (ctx.bookmark_root / "out.txt").exists()
+
+
+def test_session_round_trips_through_save_and_load(tmp_path):
     provider = FakeProvider(
         [
             [
@@ -150,6 +249,7 @@ def test_session_round_trips_through_save_and_load(tmp_path, monkeypatch):
     )
     ctx = make_ctx(tmp_path, provider)
     repl.send_turn(ctx, "write a file")
+    repl.resume_pending_confirmation(ctx, "y")
 
     from ai_cli import session as session_mod
 
@@ -163,14 +263,12 @@ def test_session_round_trips_through_save_and_load(tmp_path, monkeypatch):
     assert "write_file" in md
 
 
-def test_session_saved_incrementally_survives_mid_turn_crash(tmp_path, monkeypatch):
+def test_session_saved_incrementally_survives_mid_turn_crash(tmp_path):
     # Regression: a device crash mid-turn (during the network call for round
     # 2, after the tool from round 1 already ran) wiped out the whole
     # exchange, including the user's original request, because save_session()
     # only ran at the very end of send_turn(). Each round must persist as it
     # completes so a later crash doesn't lose earlier rounds.
-    monkeypatch.setattr("builtins.input", lambda *a: "y")
-
     provider = FakeProvider(
         [
             [
@@ -193,10 +291,13 @@ def test_session_saved_incrementally_survives_mid_turn_crash(tmp_path, monkeypat
             raise RuntimeError("simulated mid-turn crash")
             yield  # pragma: no cover - unreachable, just makes this a generator function
 
-    monkeypatch.setattr(provider, "send", send_wrapper)
+    provider.send = send_wrapper
+
+    repl.send_turn(ctx, "write a file")
+    assert ctx.pending_confirmation is not None
 
     try:
-        repl.send_turn(ctx, "write a file")
+        repl.resume_pending_confirmation(ctx, "y")
     except RuntimeError:
         pass
 
@@ -206,58 +307,3 @@ def test_session_saved_incrementally_survives_mid_turn_crash(tmp_path, monkeypat
     assert loaded.messages[0] == {"role": "user", "content": "write a file"}
     assert loaded.messages[1]["content"][0]["name"] == "write_file"
     assert loaded.messages[2]["content"][0]["type"] == "tool_result"
-
-
-def test_confirm_restores_pristine_termios_snapshot_when_available(tmp_path, monkeypatch):
-    # Regression: an earlier version patched ICANON|ECHO onto whatever *live*
-    # (possibly raw-mode) attrs were current, which froze the terminal
-    # on-device -- POSIX termios reuses c_cc slots for different meanings
-    # depending on ICANON, so patching lflags without resetting c_cc can
-    # break canonical line-reading. The fix restores a full pristine
-    # snapshot (captured before prompt_toolkit ever ran) instead.
-    import sys as sys_mod
-    from unittest.mock import MagicMock
-
-    fake_termios = MagicMock()
-    fake_termios.error = OSError
-    fake_termios.TCSANOW = 0
-    pristine_attrs = [0, 0, 0, 0o0000012, 0, 0, [0] * 32]  # captured at startup, before any raw mode
-    live_attrs = [0, 0, 0, 0, 0, 0, [1] * 32]  # whatever raw state prompt_toolkit left behind
-    fake_termios.tcgetattr.return_value = list(live_attrs)
-    monkeypatch.setattr(repl, "termios", fake_termios)
-    monkeypatch.setattr("builtins.input", lambda *a: "y")
-    fake_stdin = MagicMock()
-    fake_stdin.fileno.return_value = 0
-    monkeypatch.setattr(sys_mod, "stdin", fake_stdin)  # pytest's captured stdin has no real fileno()
-
-    ctx = make_ctx(tmp_path, provider=None)
-    ctx.pristine_termios = pristine_attrs
-    assert repl._confirm(ctx, "Allow write_file(...)?") is True
-
-    assert fake_termios.tcsetattr.call_count == 2
-    assert fake_termios.tcsetattr.call_args_list[0].args == (0, fake_termios.TCSANOW, pristine_attrs)
-    assert fake_termios.tcsetattr.call_args_list[1].args == (0, fake_termios.TCSANOW, live_attrs)
-
-
-def test_confirm_skips_termios_when_unavailable(tmp_path, monkeypatch):
-    monkeypatch.setattr(repl, "termios", None)
-    monkeypatch.setattr("builtins.input", lambda *a: "n")
-
-    ctx = make_ctx(tmp_path, provider=None)
-    assert repl._confirm(ctx, "Allow?") is False
-
-
-def test_confirm_skips_termios_when_no_pristine_snapshot_captured(tmp_path, monkeypatch):
-    # e.g. main() couldn't snapshot stdin at startup (not a real tty) --
-    # ctx.pristine_termios stays None, so don't touch termios at all.
-    from unittest.mock import MagicMock
-
-    fake_termios = MagicMock()
-    monkeypatch.setattr(repl, "termios", fake_termios)
-    monkeypatch.setattr("builtins.input", lambda *a: "y")
-
-    ctx = make_ctx(tmp_path, provider=None)
-    assert ctx.pristine_termios is None
-    assert repl._confirm(ctx, "Allow?") is True
-    fake_termios.tcgetattr.assert_not_called()
-    fake_termios.tcsetattr.assert_not_called()

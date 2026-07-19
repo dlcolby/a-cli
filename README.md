@@ -25,7 +25,7 @@ Point both tools at the same synced folder (OneDrive, iCloud Drive, Syncthing �
 - **Touch-friendly slash commands**: typing `/` pops up a filterable, tappable command list; `/model` and `/session` get their own contextual dropdowns.
 - **Skills**: markdown skill files are discovered automatically; only their name and description are shown to the model up front, with full instructions loaded on demand — the same two-tier pattern OpenCode/Claude Code use.
 - **Shared long-term memory**: reads project- and global-scoped `AGENTS.md`/`CLAUDE.md` files.
-- **Agentic file/command access**: the model can read, write, and run commands in the current project (scoped to the project folder, never the wider filesystem) — writes and commands prompt you to confirm before they run.
+- **Agentic file/command access**: the model can read, write, and run commands in the current project (scoped to the project folder, never the wider filesystem) — writes and commands ask you to confirm before they run. It shows what it wants to do, then waits for your next message: `y`/`yes` to proceed, anything else to decline (include a reason and it's passed back to the model as guidance rather than a flat no).
 - **Project-scoped and global sessions**: sessions created while you're "in" a project folder only show up there; sessions created at the top level of your shared folder are visible everywhere.
 - **Secrets stay local**: API keys are never written into the synced folder — only to a local, device-only config path — so cloud-syncing your workflow folder never risks leaking a key.
 

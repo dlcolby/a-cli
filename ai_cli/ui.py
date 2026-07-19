@@ -161,18 +161,3 @@ class Repl_UI:
                 self.session.app.output.disable_mouse_support()
                 self.session.app.output.flush()
                 self._mouse_currently_on = False
-
-    def disable_mouse_now(self) -> None:
-        """Force mouse tracking off via a raw escape-code write, with no
-        Application involved — used by repl.py's tool-confirmation prompt,
-        which deliberately avoids calling session.prompt() a second time
-        mid-turn. See repl.py's _confirm() docstring: nesting a second
-        Application.run() call within the same process was confirmed
-        on-device to crash intermittently (OSError: Errno 22 from
-        selectors.py's kqueue-based reader registration), so the
-        confirmation prompt no longer touches the Application at all —
-        it only needs this output-level mouse toggle, which is a plain
-        buffered write+flush, not a run loop."""
-        self.session.app.output.disable_mouse_support()
-        self.session.app.output.flush()
-        self._mouse_currently_on = False

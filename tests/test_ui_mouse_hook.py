@@ -63,16 +63,3 @@ def test_prompt_does_not_force_disable_in_fixed_on_mode():
     with __import__("unittest.mock", fromlist=["patch"]).patch("ai_cli.ui.build_completer", return_value=None):
         repl_ui.prompt()
     repl_ui.session.app.output.disable_mouse_support.assert_not_called()
-
-
-def test_disable_mouse_now_writes_and_flushes_regardless_of_mode():
-    # Used by repl.py's tool-confirmation prompt (see its docstring for why
-    # it deliberately avoids calling session.prompt() a second time mid-turn
-    # instead) — must be a pure output write, not an Application run.
-    for mode in ("auto", "on", "off"):
-        repl_ui = _make_repl_ui(mode)
-        repl_ui._mouse_currently_on = True
-        repl_ui.disable_mouse_now()
-        repl_ui.session.app.output.disable_mouse_support.assert_called_once()
-        repl_ui.session.app.output.flush.assert_called_once()
-        assert repl_ui._mouse_currently_on is False

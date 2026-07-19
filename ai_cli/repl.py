@@ -11,11 +11,6 @@ import traceback
 from pathlib import Path
 from typing import Optional
 
-try:
-    import termios  # POSIX only — a-shell has it; the PC test suite may run on Windows, which doesn't
-except ImportError:
-    termios = None
-
 from . import agent_tools, colors, config as config_mod, debug_log
 from . import memory, naming, session as session_mod, skills as skills_mod, ui
 from .commands import loader as command_loader
@@ -74,8 +69,9 @@ def build_context(cwd: Path, provider_override: Optional[str], model_override: O
 AGENT_TOOLS_PROMPT_BLOCK = (
     "You have read_file/write_file/run_command tools scoped to the current project root. "
     "Paths are relative to that root. write_file and run_command will ask the user to confirm "
-    "before they run — if the user declines, treat that as a hard stop for that action, not "
-    "something to retry a different way."
+    "before they run, as their next chat message. If the user declines, treat that as a hard "
+    "stop for that specific action — if they included a reason, treat it as guidance for a "
+    "different approach, not something to retry unchanged."
 )
 
 
@@ -88,94 +84,17 @@ def system_prompt(ctx: AppContext) -> str:
     return "\n\n".join(p for p in parts if p)
 
 
-def _confirm(ctx: AppContext, prompt: str) -> bool:
-    """y/N gate for write_file/run_command. History of failed approaches,
-    device-tested on-device on 2026-07-19, in order:
-
-    1. Bare input(). Hard-hung a-shell — no echo, force-quit required. Best
-       explanation: the terminal was left in whatever raw-mode state
-       prompt_toolkit's Application set up for the *previous* regular
-       prompt() call; input()'s canonical-mode assumptions don't match that,
-       so the read never completes the way it expects.
-    2. Routing through ui.Repl_UI.confirm(), which called session.prompt()
-       a second time on the same PromptSession mid-turn. This reproducibly
-       crashed — OSError: [Errno 22] Invalid argument, from selectors.py's
-       kqueue-based reader registration (loop.add_reader), at the exact same
-       line every time, even after fixing an unrelated completer/mouse-hook
-       bug in that path. Calling Application.run() a second time within the
-       same process mid-turn is unreliable on a-shell's asyncio+kqueue
-       combination, full stop — not a fixable detail, the wrong strategy.
-    3. termios: OR in ICANON|ECHO onto whatever *live* (possibly raw-mode)
-       lflags were currently set, then input(). Froze on-device — typed "y"
-       echoed nothing, no crash, just stuck. Best explanation: POSIX termios
-       reuses the same c_cc array slots for different purposes depending on
-       ICANON (VMIN/VTIME in raw mode vs. VEOF/VEOL in canonical mode).
-       prompt_toolkit likely has c_cc[VMIN] set to 0 for non-blocking raw
-       reads; flipping ICANON back on without resetting c_cc reinterprets
-       that same byte as VEOF, which can break canonical line-reading so
-       input() never sees a completed line.
-
-    Current approach: restore a full *pristine* snapshot (ctx.pristine_termios,
-    captured once in main() before prompt_toolkit ever touches the terminal)
-    rather than patching live/possibly-raw attributes — this guarantees
-    internally consistent c_cc semantics for whichever mode it's in, since
-    it's literally the terminal's own original state. Mouse tracking is
-    disabled via a raw escape-code write first (pure output, no run loop, so
-    it can't hit the kqueue issue from approach 2).
-
-    Instrumented with debug_log calls throughout (see ai_cli/debug_log.py) —
-    set AIC_DEBUG_LOG=<path> before running aic to get a timestamped trace of
-    exactly how far this gets before any future freeze/crash.
-    """
-    debug_log.log(f"_confirm: start, prompt={prompt!r}")
-    if ctx.repl_ui is not None:
-        ctx.repl_ui.disable_mouse_now()
-        debug_log.log("_confirm: mouse disabled")
-
-    debug_log.log(f"_confirm: termios_available={termios is not None}, pristine_available={ctx.pristine_termios is not None}")
-    fd = None
-    live_attrs = None
-    if termios is not None and ctx.pristine_termios is not None:
-        try:
-            fd = sys.stdin.fileno()
-            live_attrs = termios.tcgetattr(fd)
-            debug_log.log(f"_confirm: captured live termios lflag={live_attrs[3]}")
-            termios.tcsetattr(fd, termios.TCSANOW, ctx.pristine_termios)
-            debug_log.log(f"_confirm: restored pristine termios lflag={ctx.pristine_termios[3]}")
-        except (termios.error, OSError, ValueError) as exc:
-            debug_log.log(f"_confirm: termios restore failed: {exc!r}")
-            live_attrs = None
-
-    try:
-        debug_log.log("_confirm: calling input()")
-        reply = input(colors.wrap(f"{prompt} [y/N] ", colors.CONFIRM)).strip().lower()
-        debug_log.log(f"_confirm: input() returned {reply!r}")
-    finally:
-        if live_attrs is not None:
-            termios.tcsetattr(fd, termios.TCSANOW, live_attrs)
-            debug_log.log("_confirm: re-applied live termios attrs")
-
-    result = reply in ("y", "yes")
-    debug_log.log(f"_confirm: returning {result}")
-    return result
-
-
-def _run_tool_call(ctx: AppContext, root: Path, tc: ToolCall) -> dict:
-    """Execute a single tool call and return its tool_result block. Never
-    raises — failures (including a declined confirmation) become an
-    is_error tool_result so the model sees them and can react, rather than
-    crashing the chat turn."""
+def _execute_tool_call(ctx: AppContext, root: Path, tc: ToolCall) -> dict:
+    """Execute a single tool call (no confirmation gating here — callers
+    decide whether/how to gate) and return its tool_result block. Never
+    raises — failures become an is_error tool_result so the model sees them
+    and can react, rather than crashing the chat turn."""
     if tc.name == "read_skill":
         content = skills_mod.read_skill(ctx.skills, tc.input.get("name", ""))
         return tool_result_block(tc.id, content)
 
     if tc.name not in (t.name for t in agent_tools.AGENT_TOOLS):
         return tool_result_block(tc.id, f"Unknown tool '{tc.name}'", is_error=True)
-
-    description = agent_tools.describe_tool_call(tc.name, tc.input)
-    print(colors.wrap(f"[tool] {description}", colors.TOOL))
-    if tc.name in agent_tools.CONFIRM_BEFORE_NAMES and not _confirm(ctx, f"Allow {description}?"):
-        return tool_result_block(tc.id, "User declined to run this tool call.", is_error=True)
 
     try:
         content = agent_tools.execute_tool(root, tc.name, tc.input)
@@ -184,11 +103,123 @@ def _run_tool_call(ctx: AppContext, root: Path, tc: ToolCall) -> dict:
         return tool_result_block(tc.id, str(exc), is_error=True)
 
 
+def _finish_turn(ctx: AppContext, model: str) -> None:
+    """Auto-name the session on its first completed exchange (best-effort —
+    naming failures never break the chat turn), then save. Uses the actual
+    first stored message rather than a value threaded through every resume
+    step, so it works the same whether the turn finished in one round or
+    was paused and resumed across several confirmations."""
+    if ctx.session.title == "untitled" and ctx.session.messages and ctx.session.messages[0]["role"] == "user":
+        try:
+            cheap_model = CHEAP_MODEL_BY_PROVIDER.get(ctx.provider_name, model)
+            first_user_text = content_to_text(ctx.session.messages[0]["content"])
+            assistant_reply = next(
+                (content_to_text(m["content"]) for m in reversed(ctx.session.messages) if m["role"] == "assistant"),
+                "",
+            )
+            title = naming.suggest_title(ctx.provider, cheap_model, first_user_text, assistant_reply)
+            ctx.session.title = title
+            print(colors.wrap(f'[session auto-named: "{title}" — /session rename to change it]', colors.SYSTEM))
+        except Exception:
+            pass  # naming is best-effort; never let it break the chat turn
+
+    session_mod.save_session(ctx.session)
+
+
+def _advance_tool_calls(
+    ctx: AppContext,
+    model: str,
+    agent_root: Path,
+    tools: list,
+    rounds_left: int,
+    remaining: list[ToolCall],
+    result_blocks: list[dict],
+) -> None:
+    """Work through this round's tool calls in order, executing each
+    immediately unless it needs confirmation — in which case this pauses
+    here (storing everything needed to resume on ctx.pending_confirmation)
+    instead of blocking for input. See ctx.pending_confirmation's docstring
+    and resume_pending_confirmation() below for why: a synchronous nested
+    read/prompt mid-turn was tried five different ways (bare input(), a
+    nested prompt_toolkit Application, termios variations) and every one
+    either hung or crashed on-device. Reusing the main loop's own already-
+    reliable prompt() for the next line, instead of trying to grab a read
+    out-of-band mid-turn, sidesteps that whole class of bug by construction."""
+    remaining = list(remaining)
+    while remaining:
+        tc = remaining[0]
+        if tc.name != "read_skill":
+            description = agent_tools.describe_tool_call(tc.name, tc.input)
+            print(colors.wrap(f"[tool] {description}", colors.TOOL))
+            if tc.name in agent_tools.CONFIRM_BEFORE_NAMES:
+                ctx.pending_confirmation = {
+                    "model": model,
+                    "agent_root": agent_root,
+                    "tools": tools,
+                    "rounds_left": rounds_left,
+                    "remaining_tool_calls": remaining,
+                    "result_blocks": result_blocks,
+                }
+                print(
+                    colors.wrap(
+                        f'Allow {description}? Reply "y"/"yes" as your next message to proceed — '
+                        "anything else declines it (include a reason and it'll be passed back to the model).",
+                        colors.CONFIRM,
+                    )
+                )
+                return
+        result_blocks = result_blocks + [_execute_tool_call(ctx, agent_root, tc)]
+        remaining = remaining[1:]
+
+    ctx.session.messages.append({"role": "user", "content": result_blocks})
+    session_mod.save_session(ctx.session)  # persist tool results before the next network round
+    _run_round(ctx, model, agent_root, tools, rounds_left)
+
+
+def _run_round(ctx: AppContext, model: str, agent_root: Path, tools: list, rounds_left: int) -> None:
+    if rounds_left <= 0:
+        print("\n[warning] tool-call loop hit its round limit; stopping]")
+        _finish_turn(ctx, model)
+        return
+    rounds_left -= 1
+
+    messages = [Message(role=m["role"], content=m["content"]) for m in ctx.session.messages]
+    assistant_text = []
+    tool_calls: list[ToolCall] = []
+
+    print(colors.ASSISTANT, end="", flush=True)
+    for event in ctx.provider.send(model, system_prompt(ctx), messages, tools=tools, stream=ctx.config.stream):
+        if event.type == "text_delta":
+            print(event.text, end="", flush=True)
+            assistant_text.append(event.text)
+        elif event.type == "tool_call":
+            tool_calls.append(event.tool_call)
+        elif event.type == "error":
+            print(f"{colors.RESET}\n{colors.wrap(f'[error] {event.error}', colors.ERROR)}")
+            return
+
+    print(colors.RESET)  # newline after streamed text, closing the color span
+    text = "".join(assistant_text)
+    if tool_calls:
+        blocks = ([text_block(text)] if text else []) + [
+            tool_use_block(tc.id, tc.name, tc.input) for tc in tool_calls
+        ]
+        ctx.session.messages.append({"role": "assistant", "content": blocks})
+    elif text:
+        ctx.session.messages.append({"role": "assistant", "content": text})
+    session_mod.save_session(ctx.session)  # persist each round — a crash mid-loop keeps prior rounds
+
+    if not tool_calls:
+        _finish_turn(ctx, model)
+        return
+
+    _advance_tool_calls(ctx, model, agent_root, tools, rounds_left, tool_calls, [])
+
+
 def send_turn(ctx: AppContext, user_text: str, override_model: Optional[str] = None) -> None:
     if ctx.session is None:
         ctx.session = session_mod.create_session(ctx.cwd, ctx.bookmark_root, ctx.provider_name, ctx.model)
 
-    was_first_exchange = len(ctx.session.messages) == 0
     ctx.session.messages.append({"role": "user", "content": user_text})
     session_mod.save_session(ctx.session)  # save now — a crash later in this turn shouldn't lose the request
     model = override_model or ctx.model
@@ -197,56 +228,36 @@ def send_turn(ctx: AppContext, user_text: str, override_model: Optional[str] = N
     if ctx.skills:
         tools.append(READ_SKILL_TOOL)
 
-    for _ in range(MAX_TOOL_ROUNDS):
-        messages = [Message(role=m["role"], content=m["content"]) for m in ctx.session.messages]
-        assistant_text = []
-        tool_calls: list[ToolCall] = []
+    _run_round(ctx, model, agent_root, tools, MAX_TOOL_ROUNDS)
 
-        print(colors.ASSISTANT, end="", flush=True)
-        for event in ctx.provider.send(model, system_prompt(ctx), messages, tools=tools, stream=ctx.config.stream):
-            if event.type == "text_delta":
-                print(event.text, end="", flush=True)
-                assistant_text.append(event.text)
-            elif event.type == "tool_call":
-                tool_calls.append(event.tool_call)
-            elif event.type == "error":
-                print(f"{colors.RESET}\n{colors.wrap(f'[error] {event.error}', colors.ERROR)}")
-                return
 
-        print(colors.RESET)  # newline after streamed text, closing the color span
-        text = "".join(assistant_text)
-        if tool_calls:
-            blocks = ([text_block(text)] if text else []) + [
-                tool_use_block(tc.id, tc.name, tc.input) for tc in tool_calls
-            ]
-            ctx.session.messages.append({"role": "assistant", "content": blocks})
-        elif text:
-            ctx.session.messages.append({"role": "assistant", "content": text})
-        session_mod.save_session(ctx.session)  # persist each round — a crash mid-loop keeps prior rounds
+def resume_pending_confirmation(ctx: AppContext, reply_text: str) -> None:
+    """Handle the user's next typed line as the answer to a pending
+    write_file/run_command confirmation (see ctx.pending_confirmation).
+    "y"/"yes" (case-insensitive) proceeds; anything else declines — a bare
+    "n"/"no"/empty reply declines with no extra detail, anything longer is
+    passed back to the model as the user's stated reason, so declining can
+    double as redirection ("no, use -maxdepth 2 instead") rather than a
+    dead end."""
+    pending = ctx.pending_confirmation
+    ctx.pending_confirmation = None
+    remaining = pending["remaining_tool_calls"]
+    tc = remaining[0]
+    reply = reply_text.strip()
 
-        if not tool_calls:
-            break
-
-        result_blocks = [_run_tool_call(ctx, agent_root, tc) for tc in tool_calls]
-        ctx.session.messages.append({"role": "user", "content": result_blocks})
-        session_mod.save_session(ctx.session)  # persist tool results before the next network round
+    if reply.lower() in ("y", "yes"):
+        result_block = _execute_tool_call(ctx, pending["agent_root"], tc)
+    elif reply.lower() in ("", "n", "no"):
+        result_block = tool_result_block(tc.id, "User declined to run this tool call.", is_error=True)
     else:
-        print("\n[warning] tool-call loop hit its round limit; stopping]")
+        result_block = tool_result_block(
+            tc.id, f"User declined to run this tool call and said: {reply}", is_error=True
+        )
 
-    if was_first_exchange and ctx.session.title == "untitled":
-        try:
-            cheap_model = CHEAP_MODEL_BY_PROVIDER.get(ctx.provider_name, model)
-            assistant_reply = next(
-                (content_to_text(m["content"]) for m in reversed(ctx.session.messages) if m["role"] == "assistant"),
-                "",
-            )
-            title = naming.suggest_title(ctx.provider, cheap_model, user_text, assistant_reply)
-            ctx.session.title = title
-            print(colors.wrap(f'[session auto-named: "{title}" — /session rename to change it]', colors.SYSTEM))
-        except Exception:
-            pass  # naming is best-effort; never let it break the chat turn
-
-    session_mod.save_session(ctx.session)
+    result_blocks = pending["result_blocks"] + [result_block]
+    _advance_tool_calls(
+        ctx, pending["model"], pending["agent_root"], pending["tools"], pending["rounds_left"], remaining[1:], result_blocks
+    )
 
 
 def main(argv: Optional[list[str]] = None) -> None:
@@ -257,18 +268,6 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     ctx = build_context(Path.cwd(), args.provider, args.model)
     print(f"ai_cli — {ctx.provider_name}:{ctx.model}. Type /help for commands, /exit to quit.")
-
-    # Snapshot the terminal's own attributes before prompt_toolkit ever runs
-    # and puts it in raw mode — _confirm() restores this exact snapshot
-    # rather than patching whatever (possibly raw) state is live at the time,
-    # since that patching approach froze the terminal on-device. See
-    # _confirm()'s docstring for the full history.
-    if termios is not None:
-        try:
-            ctx.pristine_termios = termios.tcgetattr(sys.stdin.fileno())
-        except (termios.error, OSError, ValueError):
-            ctx.pristine_termios = None
-    debug_log.log(f"main: pristine_termios captured={ctx.pristine_termios is not None}")
 
     repl_ui = ui.Repl_UI(ctx)
     ctx.repl_ui = repl_ui
@@ -289,7 +288,18 @@ def main(argv: Optional[list[str]] = None) -> None:
                 if result.output is not None:
                     print(result.output)
                 if result.chat_turn is not None:
-                    send_turn(ctx, result.chat_turn, override_model=result.override_model)
+                    if ctx.pending_confirmation is not None:
+                        print(
+                            colors.wrap(
+                                "[warning] a tool confirmation is still pending — answer that first "
+                                "(y/yes or a reason to decline) before running a command that sends a new message]",
+                                colors.SYSTEM,
+                            )
+                        )
+                    else:
+                        send_turn(ctx, result.chat_turn, override_model=result.override_model)
+            elif ctx.pending_confirmation is not None:
+                resume_pending_confirmation(ctx, line)
             else:
                 send_turn(ctx, line)
         except Exception:

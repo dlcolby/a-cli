@@ -281,6 +281,68 @@ avoid that specific crash if it's about Python-object-level reuse rather
 than a true OS-level fd conflict. Not yet tried. See Known Issues #5 for
 where this stands and the options being considered next.
 
+**Resolution (2026-07-19): abandoned the nested-synchronous-read strategy
+entirely — confirmation now defers to the next normal chat turn.** Discussed
+the "fresh `PromptSession`" option vs. restructuring with the user: a fresh
+session object still shares the same fd and (most likely) the same
+`asyncio` event loop as the one round 2 crashed in, so it was a genuine
+coin-flip on which of two unconfirmed theories (Python-object-level state
+vs. OS/fd-level state) was actually at fault — not a real fix, just another
+guess requiring a sixth device round-trip. The restructuring approach
+sidesteps the question entirely: it never calls `Application.run()`/
+`session.prompt()` a second time mid-turn, so it can't hit this bug class
+regardless of which theory is correct.
+
+**New design.** `_advance_tool_calls()` (`repl.py`) walks a round's tool
+calls in order, executing each immediately unless it's in
+`agent_tools.CONFIRM_BEFORE_NAMES` (`write_file`/`run_command`) — for those,
+it prints what the model wants to do and *pauses*, storing everything needed
+to resume onto `ctx.pending_confirmation` (the model/agent_root/tools/
+rounds-left for this turn, the remaining not-yet-executed tool calls, and
+the tool results already computed earlier in this same round), then returns
+control all the way up to `main()`'s loop — no read happens here at all.
+`main()`'s loop checks `ctx.pending_confirmation` before treating the next
+typed line as a new chat message: if set, it routes to
+`resume_pending_confirmation()` instead, which executes or declines the
+pending tool call and calls back into `_advance_tool_calls()` to continue
+the round (processing any further tool calls in that same round, or pausing
+again if another one also needs confirmation). A slash command typed while a
+confirmation is pending still runs normally (so `/exit` etc. remain
+available as an escape hatch) — but a markdown command's `chat_turn` output
+is blocked with a warning telling the user to resolve the pending
+confirmation first, rather than silently dropping either one.
+
+**Decline-with-feedback**: a bare `y`/`yes` (case-insensitive, trimmed)
+proceeds; a bare `n`/`no`/empty reply declines with no extra detail; anything
+else typed is treated as a decline *and* passed back to the model verbatim
+("User declined to run this tool call and said: ..."), so declining doubles
+as redirection (e.g. "no, use `-maxdepth 2` instead") rather than a dead end.
+`AGENT_TOOLS_PROMPT_BLOCK`'s wording was updated to match.
+
+**UX tradeoffs, discussed with the user before building this**: the
+confirmation now looks like an ordinary chat prompt rather than a distinct
+inline `[y/N]` sub-prompt; the answer becomes a real message in
+`session.messages`/the saved transcript (previously an in-memory bool that
+was never persisted); Ctrl-C/EOF while a confirmation is pending now behaves
+like everywhere else in the app (graceful `/exit` via the main loop's
+existing handler) instead of being an untested special case; and a turn that
+needs two separate confirmations now surfaces as two visibly distinct
+pause/resume steps rather than one continuous nested exchange. Accepted as a
+reasonable tradeoff for actually working reliably, given five straight
+device round-trips of the alternative.
+
+**Removed as part of this fix** (no longer needed since there's no nested
+read to protect against): `_confirm()`, `ui.Repl_UI.disable_mouse_now()`,
+`AppContext.pristine_termios`, and the `termios` import/pristine-snapshot
+capture in `main()`. `ai_cli/debug_log.py` and its use in `main()`'s broad
+exception logger are kept — still generically useful for any future
+device-only bug, not specific to this one.
+
+**Not yet device-confirmed** — this is architecturally a different approach
+than any of the previous five attempts, not a variation on the same one, so
+it isn't subject to the same failure modes by construction — but "by
+construction" still needs a real device to prove out.
+
 ## Known issues / open actions
 
 1. **`/mouse auto` mode does not reliably work — OPEN, unresolved after two fix attempts.** Goal: dynamically enable touch-tap completion selection only while a dropdown is visible, and native terminal scrollback the rest of the time (both rely on the same xterm mouse-tracking mode, so can't be on simultaneously).
@@ -291,7 +353,7 @@ where this stands and the options being considered next.
 2. **OneDrive `pickFolder` folder-selection is unsupported** — see dedicated section above. Working around it with a local folder; Graph API integration is the real fix, not started.
 3. **OpenAI provider path is implemented but not yet device-tested** — only the Anthropic path has been exercised live on the phone so far (`/model openai:...` and the OpenAI SSE parsing are covered by unit tests, not a real on-device call).
 4. **`/setup` conversational onboarding described in early planning was never built** (see Distribution note above) — not currently a gap the user has asked to fill, noted for completeness.
-5. **Tool-confirmation prompt: five device round-trips, still OPEN.** See "Confirmation prompt hard-hung a-shell on-device" above for the full history. v1/v3/v4 (all `input()`-based, with/without termios tweaks) all hang identically, and the `AIC_DEBUG_LOG` trace from v4 proves termios isn't the variable — the terminal's raw-mode state was identical before and after. v2 (nested `session.prompt()` reusing the same `PromptSession`) is the only approach that's used a mechanism actually confirmed to receive input on this device, but it crashed on re-registering a reader for the same fd. Leading theory: a-shell may only service reads while an `asyncio` reader is actively registered (i.e. only inside a running `prompt_toolkit` `Application`) — a bare blocking read never gets serviced at all. Untested next step: a genuinely fresh, independent `PromptSession` for the confirmation (not reusing `self.session`, unlike v2) — this hasn't actually been tried; v2 only tested "reuse the same session object," not "nested Application in general." Alternative under consideration if that fails too: restructure the confirmation to defer to the *next* normal chat turn (typed as an ordinary message through the main loop's already-reliable `prompt()`) instead of a nested synchronous read at all, which would sidestep this whole class of bug at the cost of a slightly different interaction — press pause on this pending explicit user input.
+5. **Tool-confirmation prompt: five failed device round-trips, then an architectural fix — OPEN pending device confirmation.** See "Confirmation prompt hard-hung a-shell on-device" above for the full history through v1–v4 (all variations of a nested/synchronous read mid-turn; all hung or crashed differently). Rather than try a sixth variation, the confirmation now defers to the *next* normal chat turn instead of any nested read (see "Resolution (2026-07-19)" above) — this can't hit the same bug class by construction, since it never calls `Application.run()`/`session.prompt()` a second time mid-turn. Not yet re-tested on a real phone.
 6. **Ordinary chat text triggered a completion dropdown on every keystroke — FIXED, 2026-07-19.** `FuzzyCompleter` matches a single typed character against any top-level command name by subsequence (e.g. "e" fuzzy-matches "/help", "/session", "/memory", ...), and `complete_while_typing=True` meant this fired on nearly every keystroke of plain chat text, not just slash commands. Fixed with `ui._SlashOnlyCompleter`, which only delegates to the real completer when the buffer starts with `/`. Not yet device-confirmed.
 7. **Project detection silently regressed after a fresh clone — FIXED, 2026-07-19.** `PROJECT_MARKERS` didn't include `.git`, only `AGENTS.md`/`CLAUDE.md`/`.opencode`/`mobile_sessions`. When the a-cli repo itself is used as a project under `bookmark_root`, it was only recognized as a project once `mobile_sessions/` already existed there from a prior session — but that dir is gitignored, so a fresh `lg2 clone` lost the marker, project detection silently fell back to "no project," and `read_file`/`write_file`/`run_command` then resolved paths against `bookmark_root` instead of the actual project directory (symptom: the model couldn't find `README.md` even though it existed, and tried to `find` for it — which itself then hit issue #5's confirmation freeze). Fixed by adding `.git` to `PROJECT_MARKERS`, matching OpenCode's own convention and not depending on ephemeral, gitignored state.
 
