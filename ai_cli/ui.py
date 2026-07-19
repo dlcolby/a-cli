@@ -139,7 +139,7 @@ class Repl_UI:
         output.flush()
         self._mouse_currently_on = should_be_on
 
-    def prompt(self, message: str = "> ") -> str:
+    async def prompt(self, message: str = "> ") -> str:
         # Rebuild the completer each call since available models/sessions can
         # change between turns (e.g. after /session new).
         self.session.completer = build_completer(self.ctx)
@@ -153,7 +153,19 @@ class Repl_UI:
         # ANSI, since this text goes through prompt_toolkit's own renderer.
         colored_message = HTML(f"<ansicyan>{message}</ansicyan>")
         try:
-            return self.session.prompt(colored_message, mouse_support=base_mouse_support)
+            # prompt_async(), not prompt(): the sync prompt() wraps every call
+            # in its own asyncio.run(), which creates (and, on return, tears
+            # down) a brand-new event loop and kqueue selector every single
+            # turn. A device crash (OSError: Errno 22 from selectors.py's
+            # kqueue registration) surfaced on an ordinary, non-nested call
+            # to this method after several prior turns in the same session —
+            # consistent with a-shell's kqueue implementation not tolerating
+            # many create/destroy cycles within one process. prompt_async()
+            # is meant to be awaited from within an already-running loop
+            # (main() now holds one for the REPL's whole lifetime via
+            # asyncio.run() at the top level), so only one event loop and one
+            # kqueue selector ever exist for the entire session.
+            return await self.session.prompt_async(colored_message, mouse_support=base_mouse_support)
         finally:
             # Hard reset: guarantees scrollback works between turns in "auto"
             # mode even if some dismissal path didn't get caught above.

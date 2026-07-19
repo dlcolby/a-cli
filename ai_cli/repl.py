@@ -6,6 +6,7 @@ agentic loop running while the app isn't in front of the user.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 import traceback
 from pathlib import Path
@@ -260,7 +261,7 @@ def resume_pending_confirmation(ctx: AppContext, reply_text: str) -> None:
     )
 
 
-def main(argv: Optional[list[str]] = None) -> None:
+async def _main_async(argv: Optional[list[str]]) -> None:
     parser = argparse.ArgumentParser(prog="aic")
     parser.add_argument("--provider", default=None)
     parser.add_argument("--model", default=None)
@@ -274,9 +275,15 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     while not ctx.should_exit:
         try:
-            line = repl_ui.prompt()
+            line = await repl_ui.prompt()
         except (EOFError, KeyboardInterrupt):
             line = "/exit"
+        except Exception:
+            # A device crash here previously produced a raw traceback with no
+            # debug_log entry at all, since this call sat outside the
+            # exception-logging block below — log it here too now.
+            debug_log.log(f"main loop: unhandled exception in prompt():\n{traceback.format_exc()}")
+            raise
 
         line = line.strip()
         if not line:
@@ -308,6 +315,15 @@ def main(argv: Optional[list[str]] = None) -> None:
             # one), so the log file has the last thing we know either way.
             debug_log.log(f"main loop: unhandled exception:\n{traceback.format_exc()}")
             raise
+
+
+def main(argv: Optional[list[str]] = None) -> None:
+    # A single asyncio.run() for the REPL's entire lifetime, not one per
+    # prompt() call — see Repl_UI.prompt()'s docstring: repeatedly creating
+    # and tearing down an event loop (and its kqueue selector) once per turn
+    # is the leading theory for a device crash that surfaced several turns
+    # into a session, on an otherwise perfectly ordinary prompt() call.
+    asyncio.run(_main_async(argv))
 
 
 if __name__ == "__main__":

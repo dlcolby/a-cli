@@ -338,10 +338,65 @@ capture in `main()`. `ai_cli/debug_log.py` and its use in `main()`'s broad
 exception logger are kept — still generically useful for any future
 device-only bug, not specific to this one.
 
-**Not yet device-confirmed** — this is architecturally a different approach
-than any of the previous five attempts, not a variation on the same one, so
-it isn't subject to the same failure modes by construction — but "by
-construction" still needs a real device to prove out.
+**The defer-to-next-turn fix crashed anyway (2026-07-19, sixth round-trip) —
+but the traceback reframes the whole investigation.** The crash this time
+was NOT in any confirmation code at all:
+```
+File "ai_cli/repl.py", line 277, in main
+    line = repl_ui.prompt()
+File "ai_cli/ui.py", line 156, in prompt
+    return self.session.prompt(colored_message, mouse_support=base_mouse_support)
+...
+File "asyncio/selector_events.py", line 279, in _add_reader
+    self._selector.register(fd, selectors.EVENT_READ, (handle, None))
+File "selectors.py", line 505, in register
+    self._selector.control([kev], 0, 0)
+OSError: [Errno 22] Invalid argument
+```
+This is the exact same `EINVAL`/kqueue-registration error as v2's crash
+(round 2, way back near the top of this section) — except this time it hit
+the completely ordinary, never-nested, top-level `repl_ui.prompt()` call in
+`main()`'s loop, on roughly the *fifth* `prompt()` call of that session (per
+the transcript captured alongside the traceback: "read README" → "yes,
+please" → "y" → this one). **That retroactively invalidates the "nesting is
+the problem" diagnosis from v2 onward** — the same crash can happen on a
+plain, never-nested call, just later in a session. The pattern (fine for a
+few calls, fails after several more accumulate) points at a different
+mechanism: `prompt_toolkit`'s synchronous `.prompt()` calls
+`Application.run()`, which internally does `asyncio.run(coro)` — and
+`asyncio.run()` creates a **brand-new event loop, and therefore a brand-new
+kqueue selector, on every single call**, tearing it down again when that
+call returns. That happens once per turn, for the life of the process.
+Leading theory: a-shell's kqueue implementation doesn't cleanly tolerate
+many create/destroy cycles of kqueue descriptors within one process, and
+eventually one of the later registrations fails.
+
+**Fix: hold one persistent event loop for the REPL's entire lifetime,
+instead of one per turn.** `main()` is now `_main_async()`, run via a single
+`asyncio.run(_main_async(argv))` at the very top (the actual `main()` is now
+just that one-line synchronous wrapper). `Repl_UI.prompt()` is now `async
+def`, using `await self.session.prompt_async(...)` instead of the sync
+`.prompt()` — `prompt_async()` is meant to be awaited from inside an
+already-running loop rather than creating its own, so only one event loop
+and one kqueue selector ever exist for the whole session, regardless of how
+many turns it has. `send_turn()`/`resume_pending_confirmation()`/tool
+execution remain fully synchronous (blocking HTTP/subprocess calls) — no
+concurrency is needed, they're just called directly from within the async
+loop body, which is fine since nothing else needs to run concurrently while
+they block. Also fixed in the same pass: the main loop's crash-logging
+`try/except` didn't actually cover the `prompt()` call site itself (only
+command dispatch/`send_turn()`), which is why this crash produced a raw
+traceback with no matching `debug_log` entry — extended the logging to cover
+it too. Covered by `tests/test_ui_mouse_hook.py`'s
+`test_prompt_uses_prompt_async_not_sync_prompt`.
+
+**Not yet device-confirmed.** Unlike the confirmation-flow rewrite (which was
+untested but architecturally novel), this fix targets a hypothesis inferred
+from one crash's timing pattern — plausible, and it directly addresses the
+actual mechanism (`asyncio.run()` per call) rather than patching around a
+symptom, but it's still a hypothesis. If sessions still crash after enough
+turns with this in place, the "many kqueue create/destroy cycles" theory
+would need to be reconsidered.
 
 ## Known issues / open actions
 
@@ -353,7 +408,7 @@ construction" still needs a real device to prove out.
 2. **OneDrive `pickFolder` folder-selection is unsupported** — see dedicated section above. Working around it with a local folder; Graph API integration is the real fix, not started.
 3. **OpenAI provider path is implemented but not yet device-tested** — only the Anthropic path has been exercised live on the phone so far (`/model openai:...` and the OpenAI SSE parsing are covered by unit tests, not a real on-device call).
 4. **`/setup` conversational onboarding described in early planning was never built** (see Distribution note above) — not currently a gap the user has asked to fill, noted for completeness.
-5. **Tool-confirmation prompt: five failed device round-trips, then an architectural fix — OPEN pending device confirmation.** See "Confirmation prompt hard-hung a-shell on-device" above for the full history through v1–v4 (all variations of a nested/synchronous read mid-turn; all hung or crashed differently). Rather than try a sixth variation, the confirmation now defers to the *next* normal chat turn instead of any nested read (see "Resolution (2026-07-19)" above) — this can't hit the same bug class by construction, since it never calls `Application.run()`/`session.prompt()` a second time mid-turn. Not yet re-tested on a real phone.
+5. **The actual root cause was broader than "tool confirmation" — an app-wide kqueue exhaustion pattern, now addressed — OPEN pending device confirmation.** Six device round-trips total. v1-v4 chased a nested-synchronous-read theory for the confirmation prompt specifically; the defer-to-next-turn rewrite (round 5) then crashed anyway, on a plain top-level `prompt()` call with no nesting at all, which reframed the whole investigation — see "The defer-to-next-turn fix crashed anyway" above. Fix (round 6): hold a single persistent `asyncio` event loop for the REPL's entire lifetime (`_main_async()` + `prompt_async()`) instead of one per turn, since the sync `.prompt()`'s per-call `asyncio.run()` (and the kqueue selector it creates and tears down each time) is the leading theory for a crash that scaled with session length. The confirmation-flow rewrite from round 5 is kept regardless — it's still a better design (no blocking mid-turn read at all) independent of whether it was the actual crash cause. Not yet re-tested on a real phone.
 6. **Ordinary chat text triggered a completion dropdown on every keystroke — FIXED, 2026-07-19.** `FuzzyCompleter` matches a single typed character against any top-level command name by subsequence (e.g. "e" fuzzy-matches "/help", "/session", "/memory", ...), and `complete_while_typing=True` meant this fired on nearly every keystroke of plain chat text, not just slash commands. Fixed with `ui._SlashOnlyCompleter`, which only delegates to the real completer when the buffer starts with `/`. Not yet device-confirmed.
 7. **Project detection silently regressed after a fresh clone — FIXED, 2026-07-19.** `PROJECT_MARKERS` didn't include `.git`, only `AGENTS.md`/`CLAUDE.md`/`.opencode`/`mobile_sessions`. When the a-cli repo itself is used as a project under `bookmark_root`, it was only recognized as a project once `mobile_sessions/` already existed there from a prior session — but that dir is gitignored, so a fresh `lg2 clone` lost the marker, project detection silently fell back to "no project," and `read_file`/`write_file`/`run_command` then resolved paths against `bookmark_root` instead of the actual project directory (symptom: the model couldn't find `README.md` even though it existed, and tried to `find` for it — which itself then hit issue #5's confirmation freeze). Fixed by adding `.git` to `PROJECT_MARKERS`, matching OpenCode's own convention and not depending on ephemeral, gitignored state.
 
