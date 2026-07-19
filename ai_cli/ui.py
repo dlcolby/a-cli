@@ -25,6 +25,8 @@ mode between turns.
 
 from __future__ import annotations
 
+from html import escape as _html_escape
+
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import FuzzyCompleter, NestedCompleter, WordCompleter
 from prompt_toolkit.formatted_text import HTML
@@ -144,3 +146,30 @@ class Repl_UI:
                 self.session.app.output.disable_mouse_support()
                 self.session.app.output.flush()
                 self._mouse_currently_on = False
+
+    def confirm(self, prompt: str) -> bool:
+        """y/N confirmation for write_file/run_command tool calls, routed
+        through this same PromptSession instead of a bare input() call.
+
+        Device report (2026-07): plain input() for this prompt hard-hung
+        a-shell (no echo, unrecoverable) when a tool call needed confirming.
+        repl.py's original comment assumed "no terminal-mode conflict" since
+        the Application had already returned for the turn — that assumption
+        was never actually verified on-device and this report shows it's
+        false, most likely because a-shell's terminal is left in whatever
+        raw-mode/mouse-tracking state prompt_toolkit set up, which a bare
+        input() doesn't know how to negotiate. Reusing session.prompt() here
+        keeps confirmation on the one input path that's confirmed working
+        on a real device."""
+        self.session.app.output.disable_mouse_support()
+        self.session.app.output.flush()
+        self._mouse_currently_on = False
+        message = HTML(f"<b><ansiyellow>{_html_escape(prompt)} [y/N] </ansiyellow></b>")
+        try:
+            reply = self.session.prompt(message, mouse_support=False)
+        finally:
+            if self.ctx.mouse_mode == "auto":
+                self.session.app.output.disable_mouse_support()
+                self.session.app.output.flush()
+                self._mouse_currently_on = False
+        return reply.strip().lower() in ("y", "yes")

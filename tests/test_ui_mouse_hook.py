@@ -63,3 +63,30 @@ def test_prompt_does_not_force_disable_in_fixed_on_mode():
     with __import__("unittest.mock", fromlist=["patch"]).patch("ai_cli.ui.build_completer", return_value=None):
         repl_ui.prompt()
     repl_ui.session.app.output.disable_mouse_support.assert_not_called()
+
+
+def test_confirm_uses_prompt_session_not_bare_input():
+    repl_ui = _make_repl_ui("on")
+    repl_ui.session.prompt.return_value = "y"
+    assert repl_ui.confirm("Allow run_command(...)?") is True
+    repl_ui.session.prompt.assert_called_once()
+    repl_ui.session.app.output.disable_mouse_support.assert_called_once()
+
+
+def test_confirm_disables_mouse_even_in_fixed_on_mode():
+    # Regression: fixed "on" mode leaves mouse tracking enabled across turns,
+    # which is exactly the state a bare input() call couldn't handle
+    # on-device. confirm() must force it off before prompting regardless of
+    # ctx.mouse_mode.
+    repl_ui = _make_repl_ui("on")
+    repl_ui.session.prompt.return_value = "n"
+    assert repl_ui.confirm("Allow write_file(...)?") is False
+    repl_ui.session.app.output.disable_mouse_support.assert_called_once()
+    repl_ui.session.app.output.flush.assert_called()
+
+
+def test_confirm_rejects_anything_but_y_or_yes():
+    repl_ui = _make_repl_ui("off")
+    for answer, expected in [("", False), ("n", False), ("no", False), ("y", True), ("yes", True), ("Y", True)]:
+        repl_ui.session.prompt.return_value = answer
+        assert repl_ui.confirm("Allow?") is expected

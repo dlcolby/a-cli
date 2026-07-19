@@ -82,8 +82,13 @@ def system_prompt(ctx: AppContext) -> str:
     return "\n\n".join(p for p in parts if p)
 
 
-def _confirm(prompt: str) -> bool:
-    reply = input(colors.wrap(f"{prompt} [y/N] ", colors.SYSTEM)).strip().lower()
+def _confirm(ctx: AppContext, prompt: str) -> bool:
+    # Prefer the PromptSession-backed confirm (ui.Repl_UI.confirm) when a UI
+    # is attached — see its docstring for why a bare input() call is unsafe
+    # on-device. Falls back to plain input() when there's no UI (tests).
+    if ctx.repl_ui is not None:
+        return ctx.repl_ui.confirm(prompt)
+    reply = input(colors.wrap(f"{prompt} [y/N] ", colors.CONFIRM)).strip().lower()
     return reply in ("y", "yes")
 
 
@@ -100,8 +105,8 @@ def _run_tool_call(ctx: AppContext, root: Path, tc: ToolCall) -> dict:
         return tool_result_block(tc.id, f"Unknown tool '{tc.name}'", is_error=True)
 
     description = agent_tools.describe_tool_call(tc.name, tc.input)
-    print(colors.wrap(f"[tool] {description}", colors.SYSTEM))
-    if tc.name in agent_tools.CONFIRM_BEFORE_NAMES and not _confirm(f"Allow {description}?"):
+    print(colors.wrap(f"[tool] {description}", colors.TOOL))
+    if tc.name in agent_tools.CONFIRM_BEFORE_NAMES and not _confirm(ctx, f"Allow {description}?"):
         return tool_result_block(tc.id, "User declined to run this tool call.", is_error=True)
 
     try:
@@ -183,6 +188,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     print(f"ai_cli — {ctx.provider_name}:{ctx.model}. Type /help for commands, /exit to quit.")
 
     repl_ui = ui.Repl_UI(ctx)
+    ctx.repl_ui = repl_ui
 
     while not ctx.should_exit:
         try:

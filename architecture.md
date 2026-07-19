@@ -58,7 +58,7 @@ Session scoping: `/session list` shows the nearest `mobile_sessions/` walking up
 - `commands/markdown_command.py` — OpenCode-style `.opencode/commands/*.md` parser (`$ARGUMENTS`, `$1`, `@file`; `` !`shell` `` interpolation deliberately disabled by default).
 - `ui.py` — `prompt_toolkit`-based input loop: `NestedCompleter`+`FuzzyCompleter` for touch-friendly dropdowns, plus the mouse-mode handling (see Known Issues — **currently broken**).
 - `naming.py` — auto-proposes a short session title from the first exchange using a cheap model; best-effort, never blocks a chat turn on failure.
-- `colors.py` — minimal ANSI helpers; cyan user-prompt marker, green assistant replies, red errors, yellow system notices — aimed at making it easy to spot turn boundaries when scrolling back.
+- `colors.py` — minimal ANSI helpers; cyan user-prompt marker, green assistant replies, red errors, yellow system notices, magenta `[tool]` call descriptions, bold-yellow confirmation prompts — aimed at making it easy to spot turn boundaries, and to distinguish agentic tool activity/confirmations from normal chat, when scrolling back.
 - `config.py` — secrets precedence (env var > `secrets.json` > interactive prompt); startup guard asserting secrets never live under `bookmark_root`.
 - `context.py` — `AppContext`, the mutable state threaded through commands/REPL.
 - `repl.py` — the main loop, including a simplified single-tool (`read_skill`) tool-call loop.
@@ -115,10 +115,31 @@ to 12 to allow real read→write→run sequences instead of just one skill looku
 Not yet done: no opt-out toggle to disable agent tools entirely (e.g. for a
 read-only chat session) — every turn currently offers the model file
 read/write/run capability, protected only by the confirmation gate. Revisit if
-that turns out to matter in practice. Also not yet device-tested — spike 4
-validated the underlying `subprocess` primitives on-device, but the tool loop
-itself (confirmation prompt behavior, `run_command` in a-shell specifically)
-has only been exercised via the PC test suite so far.
+that turns out to matter in practice.
+
+**Confirmation prompt hard-hung a-shell on-device (found + fixed, 2026-07-19):**
+the original `_confirm()` in `repl.py` used a bare `input()` call for the
+`write_file`/`run_command` y/N gate, on the assumption (stated in the original
+comment, never actually verified on a real device) that since
+`prompt_toolkit`'s `Application` had already returned for the turn there'd be
+no terminal-mode conflict. Confirmed wrong on-device: triggering a `run_command`
+tool call (a `find` command) and hitting the confirmation prompt hard-hung
+a-shell — no echo, unrecoverable, force-quit required, the same class of
+symptom as the `os.fork()` finding in spike 4. Most likely cause: a bare
+`input()` doesn't negotiate whatever raw-mode/mouse-tracking terminal state
+`prompt_toolkit` leaves behind, unlike `prompt_toolkit`'s own input path, which
+*is* confirmed working on-device (streaming, completion dropdowns). **Fix**:
+added `Repl_UI.confirm()` in `ui.py`, which reuses the same `PromptSession`
+(explicitly forcing mouse support off first, regardless of `ctx.mouse_mode`,
+then restoring the "auto" hard-reset in a `finally`) instead of a separate
+`input()` call. `AppContext` gained a `repl_ui` field (`main()` sets it after
+constructing `Repl_UI`); `repl.py`'s `_confirm()` now routes through
+`ctx.repl_ui.confirm()` when present and only falls back to bare `input()`
+when there's no UI attached (the PC test suite's `AppContext`s, which
+monkeypatch `builtins.input` directly). **Not yet device-tested** — this fix
+addresses the most likely root cause reasoned from the existing on-device
+`os.fork()`/mouse-mode findings, but hasn't itself been confirmed to resolve
+the hang on a real phone yet.
 
 ## Known issues / open actions
 
@@ -130,6 +151,7 @@ has only been exercised via the PC test suite so far.
 2. **OneDrive `pickFolder` folder-selection is unsupported** — see dedicated section above. Working around it with a local folder; Graph API integration is the real fix, not started.
 3. **OpenAI provider path is implemented but not yet device-tested** — only the Anthropic path has been exercised live on the phone so far (`/model openai:...` and the OpenAI SSE parsing are covered by unit tests, not a real on-device call).
 4. **`/setup` conversational onboarding described in early planning was never built** (see Distribution note above) — not currently a gap the user has asked to fill, noted for completeness.
+5. **Tool-confirmation prompt fix needs on-device re-test — OPEN.** See "Confirmation prompt hard-hung a-shell on-device" above: `_confirm()` now goes through `Repl_UI.confirm()` (same `PromptSession`) instead of bare `input()`. Reasoned fix, not yet confirmed against the actual on-device hang.
 
 ## Verification approach
 

@@ -11,6 +11,8 @@ USER = "\x1b[36m"  # cyan
 ASSISTANT = "\x1b[32m"  # green
 SYSTEM = "\x1b[33m"  # yellow — auto-naming notices, warnings
 ERROR = "\x1b[31m"  # red
+TOOL = "\x1b[35m"  # magenta — "[tool] ..." call descriptions, distinct from assistant text
+CONFIRM = "\x1b[1;33m"  # bold yellow — y/N prompts that need the user's attention/action
 
 
 def wrap(text: str, color: str) -> str:
