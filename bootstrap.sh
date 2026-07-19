@@ -1,15 +1,19 @@
-#!/usr/bin/env bash
-# Run this once, inside a-shell, right after `git clone`-ing this repo.
-# It installs pure-Python dependencies, sets up local (never-synced) config
+#!/bin/sh
+# Run this once, inside a-shell, right after cloning this repo (a-shell has no
+# full `git` — use its bundled `lg2` command instead: `lg2 clone <url>`).
+# This installs pure-Python dependencies, sets up local (never-synced) config
 # storage, and installs the `aic` launcher into ~/Documents/bin.
 #
 # It deliberately does not touch OneDrive/pickFolder itself — bookmark a synced
 # folder yourself (e.g. via a-shell's `pickFolder` command) before running
 # `aic` for the first time, since the first-run prompts will ask for that
 # folder's path directly.
-set -euo pipefail
+#
+# Written for POSIX sh, not bash: a-shell's shell doesn't support bash-only
+# features like `set -o pipefail` or $BASH_SOURCE.
+set -eu
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOCAL_HOME="${MOBILECLI_HOME:-$HOME/Documents/.mobilecli}"
 BIN_DIR="$HOME/Documents/bin"
 
