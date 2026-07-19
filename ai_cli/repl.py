@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import traceback
 from pathlib import Path
 from typing import Optional
 
@@ -15,7 +16,7 @@ try:
 except ImportError:
     termios = None
 
-from . import agent_tools, colors, config as config_mod
+from . import agent_tools, colors, config as config_mod, debug_log
 from . import memory, naming, session as session_mod, skills as skills_mod, ui
 from .commands import loader as command_loader
 from .commands.markdown_command import discover_commands
@@ -100,46 +101,63 @@ def _confirm(ctx: AppContext, prompt: str) -> bool:
        a second time on the same PromptSession mid-turn. This reproducibly
        crashed — OSError: [Errno 22] Invalid argument, from selectors.py's
        kqueue-based reader registration (loop.add_reader), at the exact same
-       line every time. Tweaking the completer/mouse-hook state around it
-       (a real bug in its own right — see git history) didn't help, because
-       the crash isn't about completion or mouse state: calling
-       Application.run() a second time within the same process mid-turn is
-       unreliable on a-shell's asyncio+kqueue combination, full stop. Worse,
-       it was intermittent: sometimes a catchable exception, sometimes an
-       unrecoverable crash with no traceback at all and no chance to save
-       session state first.
+       line every time, even after fixing an unrelated completer/mouse-hook
+       bug in that path. Calling Application.run() a second time within the
+       same process mid-turn is unreliable on a-shell's asyncio+kqueue
+       combination, full stop — not a fixable detail, the wrong strategy.
+    3. termios: OR in ICANON|ECHO onto whatever *live* (possibly raw-mode)
+       lflags were currently set, then input(). Froze on-device — typed "y"
+       echoed nothing, no crash, just stuck. Best explanation: POSIX termios
+       reuses the same c_cc array slots for different purposes depending on
+       ICANON (VMIN/VTIME in raw mode vs. VEOF/VEOL in canonical mode).
+       prompt_toolkit likely has c_cc[VMIN] set to 0 for non-blocking raw
+       reads; flipping ICANON back on without resetting c_cc reinterprets
+       that same byte as VEOF, which can break canonical line-reading so
+       input() never sees a completed line.
 
-    Current approach: don't touch prompt_toolkit's Application a second time
-    at all. Disable mouse tracking via a raw escape-code write (pure output,
-    no run loop, so it can't hit the kqueue issue), then explicitly force the
-    terminal to canonical+echo mode via termios ourselves — since approach 1
-    shows we can't trust the terminal to already be in that state — before a
-    plain input() call.
+    Current approach: restore a full *pristine* snapshot (ctx.pristine_termios,
+    captured once in main() before prompt_toolkit ever touches the terminal)
+    rather than patching live/possibly-raw attributes — this guarantees
+    internally consistent c_cc semantics for whichever mode it's in, since
+    it's literally the terminal's own original state. Mouse tracking is
+    disabled via a raw escape-code write first (pure output, no run loop, so
+    it can't hit the kqueue issue from approach 2).
+
+    Instrumented with debug_log calls throughout (see ai_cli/debug_log.py) —
+    set AIC_DEBUG_LOG=<path> before running aic to get a timestamped trace of
+    exactly how far this gets before any future freeze/crash.
     """
+    debug_log.log(f"_confirm: start, prompt={prompt!r}")
     if ctx.repl_ui is not None:
         ctx.repl_ui.disable_mouse_now()
+        debug_log.log("_confirm: mouse disabled")
 
+    debug_log.log(f"_confirm: termios_available={termios is not None}, pristine_available={ctx.pristine_termios is not None}")
     fd = None
-    old_attrs = None
-    if termios is not None:
+    live_attrs = None
+    if termios is not None and ctx.pristine_termios is not None:
         try:
             fd = sys.stdin.fileno()
-            old_attrs = termios.tcgetattr(fd)
-            cooked = termios.tcgetattr(fd)
-            cooked[3] |= termios.ICANON | termios.ECHO  # lflags
-            termios.tcsetattr(fd, termios.TCSANOW, cooked)
-        except (termios.error, OSError, ValueError):
-            # No real terminal attached (e.g. stdin isn't a tty) — nothing to
-            # force, fall through to a plain input() below.
-            old_attrs = None
+            live_attrs = termios.tcgetattr(fd)
+            debug_log.log(f"_confirm: captured live termios lflag={live_attrs[3]}")
+            termios.tcsetattr(fd, termios.TCSANOW, ctx.pristine_termios)
+            debug_log.log(f"_confirm: restored pristine termios lflag={ctx.pristine_termios[3]}")
+        except (termios.error, OSError, ValueError) as exc:
+            debug_log.log(f"_confirm: termios restore failed: {exc!r}")
+            live_attrs = None
 
     try:
+        debug_log.log("_confirm: calling input()")
         reply = input(colors.wrap(f"{prompt} [y/N] ", colors.CONFIRM)).strip().lower()
+        debug_log.log(f"_confirm: input() returned {reply!r}")
     finally:
-        if termios is not None and old_attrs is not None:
-            termios.tcsetattr(fd, termios.TCSANOW, old_attrs)
+        if live_attrs is not None:
+            termios.tcsetattr(fd, termios.TCSANOW, live_attrs)
+            debug_log.log("_confirm: re-applied live termios attrs")
 
-    return reply in ("y", "yes")
+    result = reply in ("y", "yes")
+    debug_log.log(f"_confirm: returning {result}")
+    return result
 
 
 def _run_tool_call(ctx: AppContext, root: Path, tc: ToolCall) -> dict:
@@ -240,6 +258,18 @@ def main(argv: Optional[list[str]] = None) -> None:
     ctx = build_context(Path.cwd(), args.provider, args.model)
     print(f"ai_cli — {ctx.provider_name}:{ctx.model}. Type /help for commands, /exit to quit.")
 
+    # Snapshot the terminal's own attributes before prompt_toolkit ever runs
+    # and puts it in raw mode — _confirm() restores this exact snapshot
+    # rather than patching whatever (possibly raw) state is live at the time,
+    # since that patching approach froze the terminal on-device. See
+    # _confirm()'s docstring for the full history.
+    if termios is not None:
+        try:
+            ctx.pristine_termios = termios.tcgetattr(sys.stdin.fileno())
+        except (termios.error, OSError, ValueError):
+            ctx.pristine_termios = None
+    debug_log.log(f"main: pristine_termios captured={ctx.pristine_termios is not None}")
+
     repl_ui = ui.Repl_UI(ctx)
     ctx.repl_ui = repl_ui
 
@@ -253,14 +283,21 @@ def main(argv: Optional[list[str]] = None) -> None:
         if not line:
             continue
 
-        if line.startswith("/"):
-            result = command_loader.dispatch(ctx, line)
-            if result.output is not None:
-                print(result.output)
-            if result.chat_turn is not None:
-                send_turn(ctx, result.chat_turn, override_model=result.override_model)
-        else:
-            send_turn(ctx, line)
+        try:
+            if line.startswith("/"):
+                result = command_loader.dispatch(ctx, line)
+                if result.output is not None:
+                    print(result.output)
+                if result.chat_turn is not None:
+                    send_turn(ctx, result.chat_turn, override_model=result.override_model)
+            else:
+                send_turn(ctx, line)
+        except Exception:
+            # A device crash previously left no trace at all — log the full
+            # traceback before it propagates (or before the app dies without
+            # one), so the log file has the last thing we know either way.
+            debug_log.log(f"main loop: unhandled exception:\n{traceback.format_exc()}")
+            raise
 
 
 if __name__ == "__main__":

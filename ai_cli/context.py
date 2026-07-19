@@ -27,6 +27,7 @@ class AppContext:
     model_cache: dict = field(default_factory=dict)  # provider_name -> list[ModelInfo], live-queried
     mouse_mode: str = "auto"  # "auto" | "on" | "off" — see ui.py docstring
     repl_ui: Optional[object] = None  # ui.Repl_UI once main() constructs it; None in tests/no-UI contexts
+    pristine_termios: Optional[object] = None  # tcgetattr() snapshot taken before any raw-mode use — see repl.py's _confirm()
 
     def get_api_key(self, provider_name: str) -> Optional[str]:
         return config_mod.get_api_key(provider_name)

@@ -196,14 +196,62 @@ hang shows the terminal can't be trusted to already be in a normal
 it there itself via `termios.tcsetattr()` (guarded by `try/except
 ImportError` at module scope, since `termios` doesn't exist on the Windows PC
 running the test suite), then falls back to a plain `input()` call, restoring
-the original terminal attributes in a `finally`. Covered by
-`tests/test_repl_tool_loop.py`'s `test_confirm_forces_canonical_echo_mode_when_termios_available`
-and `test_confirm_skips_termios_when_unavailable`. Also added incremental
+the original terminal attributes in a `finally`. Also added incremental
 `session_mod.save_session()` calls after every message append in `send_turn()`
 (previously only saved once, at the very end) so a crash anywhere mid-turn —
-whatever eventually causes it — no longer loses the whole exchange. **Still
-not device-confirmed** — this is the third attempt at this exact code path;
-don't treat it as resolved until confirmed on a real phone.
+whatever eventually causes it — no longer loses the whole exchange.
+
+**Fix v3's termios patch froze the terminal on-device instead (2026-07-19,
+fourth round-trip).** Typing `"y"` echoed nothing and the app just sat there
+— no crash, no traceback, genuinely stuck. v3's termios logic patched
+`ICANON`/`ECHO` onto whatever *live* lflags were currently set (i.e.
+whatever raw-mode state `prompt_toolkit` had left the terminal in) rather
+than restoring a full snapshot. Best explanation: POSIX termios reuses the
+same `c_cc` array slots for different purposes depending on `ICANON`
+(`VMIN`/`VTIME` control blocking behavior in raw/non-canonical mode;
+`VEOF`/`VEOL` replace those same slots in canonical mode). `prompt_toolkit`
+likely sets `c_cc[VMIN] = 0` for non-blocking raw reads; flipping `ICANON`
+back on without touching `c_cc` reinterprets that same byte as `VEOF`
+(end-of-file character), which can silently break canonical line-reading —
+`input()`'s underlying `readline()` never sees a completed line the way it
+expects, so it blocks forever with no exception to catch.
+
+**Fix v4 (current): stop patching live attributes — restore a full pristine
+snapshot instead.** `main()` now captures `termios.tcgetattr(stdin_fd)`
+*once*, into `ctx.pristine_termios`, before `Repl_UI`/`PromptSession` is even
+constructed (i.e. before `prompt_toolkit` has ever had a chance to touch the
+terminal) — this snapshot is guaranteed internally consistent (correct
+`c_cc` semantics for whatever mode it's in) since it's literally the
+terminal's own original state, never hand-patched. `_confirm()` now: captures
+whatever *live* attrs are current (to restore afterward), restores
+`ctx.pristine_termios` verbatim, calls `input()`, then restores the captured
+live attrs in a `finally` — so `prompt_toolkit`'s next regular `prompt()`
+call picks back up in whatever raw state it expects. Covered by
+`tests/test_repl_tool_loop.py`'s
+`test_confirm_restores_pristine_termios_snapshot_when_available`,
+`test_confirm_skips_termios_when_unavailable`, and
+`test_confirm_skips_termios_when_no_pristine_snapshot_captured`.
+
+**Also added: `ai_cli/debug_log.py`, opt-in diagnostic logging for exactly
+this class of bug.** No-op unless `AIC_DEBUG_LOG=<path>` is set in the
+environment before running `aic`; each call opens, writes, and closes the
+file immediately (no buffering to lose on a freeze/crash that never shuts
+down cleanly). `_confirm()` is instrumented at every step (mouse-disable,
+termios availability, before/after each `tcsetattr`, immediately before and
+after the `input()` call itself — the line most likely to reveal exactly
+where a future freeze happens, since "logged 'calling input()' but never
+logged 'input() returned'" pins the hang to that exact call). `main()`'s loop
+also now wraps command dispatch/`send_turn()` in a broad
+`try/except Exception` that logs the full traceback via `debug_log.log()`
+before re-raising, so even an exception that doesn't print visibly to
+a-shell's console (as happened with one of the v2 crashes) still leaves a
+trace on disk. See `tests/spikes/debug_logs/README.md` for the exact
+commands to capture and commit a trace after reproducing an issue.
+
+**Still not device-confirmed** — this is the fourth attempt at this exact
+code path; don't treat it as resolved until confirmed on a real phone. If it
+fails again, the `AIC_DEBUG_LOG` trace should make the next diagnosis much
+less speculative than the last four have been.
 
 ## Known issues / open actions
 
@@ -215,7 +263,7 @@ don't treat it as resolved until confirmed on a real phone.
 2. **OneDrive `pickFolder` folder-selection is unsupported** — see dedicated section above. Working around it with a local folder; Graph API integration is the real fix, not started.
 3. **OpenAI provider path is implemented but not yet device-tested** — only the Anthropic path has been exercised live on the phone so far (`/model openai:...` and the OpenAI SSE parsing are covered by unit tests, not a real on-device call).
 4. **`/setup` conversational onboarding described in early planning was never built** (see Distribution note above) — not currently a gap the user has asked to fill, noted for completeness.
-5. **Tool-confirmation prompt: three device round-trips, still OPEN.** See "Confirmation prompt hard-hung a-shell on-device" above for the full history. v1 (nested `session.prompt()`) and v2 (v1 + completer/mouse-hook fix) both failed on-device with variations of the same `EINVAL`/hard-crash pattern — the nested-`Application.run()` strategy itself was the problem, not a fixable detail of it. v3 abandons `prompt_toolkit` for this entirely (raw `termios` + `input()`) and adds incremental session saving so a future crash, whatever causes it, doesn't lose the whole exchange. Not yet re-tested on a real phone.
+5. **Tool-confirmation prompt: four device round-trips, still OPEN.** See "Confirmation prompt hard-hung a-shell on-device" above for the full history — v1 (nested `session.prompt()`), v2 (v1 + completer/mouse-hook fix), and v3 (raw `termios` patch on live attrs) each failed differently on-device (hang, `EINVAL` crash, hang again). v4 restores a full pristine `termios` snapshot instead of patching live attrs, and `ai_cli/debug_log.py` now gives a way to get an actual on-device trace (set `AIC_DEBUG_LOG=<path>`, reproduce, commit the log under `tests/spikes/debug_logs/`) instead of reasoning blind from crash reports alone. Not yet re-tested on a real phone.
 
 ## Verification approach
 

@@ -208,17 +208,22 @@ def test_session_saved_incrementally_survives_mid_turn_crash(tmp_path, monkeypat
     assert loaded.messages[2]["content"][0]["type"] == "tool_result"
 
 
-def test_confirm_forces_canonical_echo_mode_when_termios_available(tmp_path, monkeypatch):
+def test_confirm_restores_pristine_termios_snapshot_when_available(tmp_path, monkeypatch):
+    # Regression: an earlier version patched ICANON|ECHO onto whatever *live*
+    # (possibly raw-mode) attrs were current, which froze the terminal
+    # on-device -- POSIX termios reuses c_cc slots for different meanings
+    # depending on ICANON, so patching lflags without resetting c_cc can
+    # break canonical line-reading. The fix restores a full pristine
+    # snapshot (captured before prompt_toolkit ever ran) instead.
     import sys as sys_mod
     from unittest.mock import MagicMock
 
     fake_termios = MagicMock()
     fake_termios.error = OSError
-    fake_termios.ICANON = 0o0000002
-    fake_termios.ECHO = 0o0000010
     fake_termios.TCSANOW = 0
-    attrs = [0, 0, 0, 0o0, 0, 0, [0] * 32]
-    fake_termios.tcgetattr.side_effect = lambda fd: list(attrs)  # a fresh copy each call, like real termios
+    pristine_attrs = [0, 0, 0, 0o0000012, 0, 0, [0] * 32]  # captured at startup, before any raw mode
+    live_attrs = [0, 0, 0, 0, 0, 0, [1] * 32]  # whatever raw state prompt_toolkit left behind
+    fake_termios.tcgetattr.return_value = list(live_attrs)
     monkeypatch.setattr(repl, "termios", fake_termios)
     monkeypatch.setattr("builtins.input", lambda *a: "y")
     fake_stdin = MagicMock()
@@ -226,14 +231,12 @@ def test_confirm_forces_canonical_echo_mode_when_termios_available(tmp_path, mon
     monkeypatch.setattr(sys_mod, "stdin", fake_stdin)  # pytest's captured stdin has no real fileno()
 
     ctx = make_ctx(tmp_path, provider=None)
+    ctx.pristine_termios = pristine_attrs
     assert repl._confirm(ctx, "Allow write_file(...)?") is True
 
     assert fake_termios.tcsetattr.call_count == 2
-    forced_attrs = fake_termios.tcsetattr.call_args_list[0].args[2]
-    assert forced_attrs[3] & fake_termios.ICANON
-    assert forced_attrs[3] & fake_termios.ECHO
-    restored_attrs = fake_termios.tcsetattr.call_args_list[1].args
-    assert restored_attrs == (0, fake_termios.TCSANOW, attrs)
+    assert fake_termios.tcsetattr.call_args_list[0].args == (0, fake_termios.TCSANOW, pristine_attrs)
+    assert fake_termios.tcsetattr.call_args_list[1].args == (0, fake_termios.TCSANOW, live_attrs)
 
 
 def test_confirm_skips_termios_when_unavailable(tmp_path, monkeypatch):
@@ -242,3 +245,19 @@ def test_confirm_skips_termios_when_unavailable(tmp_path, monkeypatch):
 
     ctx = make_ctx(tmp_path, provider=None)
     assert repl._confirm(ctx, "Allow?") is False
+
+
+def test_confirm_skips_termios_when_no_pristine_snapshot_captured(tmp_path, monkeypatch):
+    # e.g. main() couldn't snapshot stdin at startup (not a real tty) --
+    # ctx.pristine_termios stays None, so don't touch termios at all.
+    from unittest.mock import MagicMock
+
+    fake_termios = MagicMock()
+    monkeypatch.setattr(repl, "termios", fake_termios)
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+
+    ctx = make_ctx(tmp_path, provider=None)
+    assert ctx.pristine_termios is None
+    assert repl._confirm(ctx, "Allow?") is True
+    fake_termios.tcgetattr.assert_not_called()
+    fake_termios.tcsetattr.assert_not_called()
