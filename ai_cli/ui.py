@@ -160,14 +160,32 @@ class Repl_UI:
         raw-mode/mouse-tracking state prompt_toolkit set up, which a bare
         input() doesn't know how to negotiate. Reusing session.prompt() here
         keeps confirmation on the one input path that's confirmed working
-        on a real device."""
+        on a real device.
+
+        Follow-up device report: that first attempt still crashed — typing
+        "y" popped a completion dropdown (this call left self.session's live
+        NestedCompleter + complete_while_typing=True attached from the last
+        regular prompt, and FuzzyCompleter matches almost anything against a
+        single character), which then fired the _sync_mouse_state
+        on_invalidate hook. That hook doesn't know this call asked for
+        mouse_support=False, so it called enable_mouse_support() on an
+        Application explicitly configured without mouse support — that
+        mismatch is the likely cause of the EINVAL crash in prompt_toolkit's
+        input-registration code. Fix: disable completion for this call
+        (per-call kwargs, not mutating session state) and detach the
+        auto-mouse hook for the duration so nothing can flip mouse support
+        mid-run regardless of dropdown state."""
         self.session.app.output.disable_mouse_support()
         self.session.app.output.flush()
         self._mouse_currently_on = False
+        self.session.app.on_invalidate -= self._sync_mouse_state
         message = HTML(f"<b><ansiyellow>{_html_escape(prompt)} [y/N] </ansiyellow></b>")
         try:
-            reply = self.session.prompt(message, mouse_support=False)
+            reply = self.session.prompt(
+                message, mouse_support=False, completer=None, complete_while_typing=False
+            )
         finally:
+            self.session.app.on_invalidate += self._sync_mouse_state
             if self.ctx.mouse_mode == "auto":
                 self.session.app.output.disable_mouse_support()
                 self.session.app.output.flush()

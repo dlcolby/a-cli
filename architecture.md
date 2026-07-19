@@ -136,10 +136,37 @@ then restoring the "auto" hard-reset in a `finally`) instead of a separate
 constructing `Repl_UI`); `repl.py`'s `_confirm()` now routes through
 `ctx.repl_ui.confirm()` when present and only falls back to bare `input()`
 when there's no UI attached (the PC test suite's `AppContext`s, which
-monkeypatch `builtins.input` directly). **Not yet device-tested** — this fix
-addresses the most likely root cause reasoned from the existing on-device
-`os.fork()`/mouse-mode findings, but hasn't itself been confirmed to resolve
-the hang on a real phone yet.
+monkeypatch `builtins.input` directly).
+
+**That first fix attempt still crashed on-device (2026-07-19, same day)**: two
+new symptoms. (1) typing `"y"` at the confirmation prompt popped a completion
+dropdown. (2) that then produced a hard crash — traceback bottoming out in
+`selectors`/`asyncio`'s `loop.add_reader` raising `OSError: [Errno 22] Invalid
+argument`, via `prompt_toolkit`'s `vt100.py` `_attached_input` /
+`shortcuts/prompt.py`'s `app.run()`, from `Repl_UI.confirm()`'s
+`self.session.prompt(...)` call. Root cause of (1): `confirm()` reused
+`self.session`, which still had whatever `NestedCompleter` +
+`complete_while_typing=True` was left set from the *previous* regular
+`prompt()` call — `FuzzyCompleter` matches a single character against almost
+anything, so `"y"` triggered a dropdown. Root cause of (2), following from
+(1): that dropdown appearing changed `complete_state`, which fired the
+`on_invalidate` auto-mouse hook (`_sync_mouse_state`, still attached to
+`self.session.app` since `confirm()` never touched it) — the hook doesn't know
+this particular call asked for `mouse_support=False`, so it called
+`output.enable_mouse_support()` on an `Application` explicitly configured
+without mouse support. That mismatch between the Application's compiled-in
+mouse configuration and the raw escape codes being pushed at runtime is the
+most likely cause of the `EINVAL` in the input-registration path. **Fix v2**:
+`confirm()` now passes `completer=None, complete_while_typing=False` as
+per-call overrides to `session.prompt()` (not mutating session state, so
+nothing needs restoring) and detaches `_sync_mouse_state` from
+`self.session.app.on_invalidate` for the duration of the call, re-attaching it
+in the `finally` — so nothing can flip mouse support mid-call regardless of
+completion state. Covered by new regression tests in
+`tests/test_ui_mouse_hook.py` (`test_confirm_disables_completion_for_this_call`,
+`test_confirm_detaches_and_reattaches_auto_mouse_hook`). **Still not
+device-confirmed** — this is now two device round-trips into the same code
+path; treat it as reasoned-but-unverified until the user reports back.
 
 ## Known issues / open actions
 
