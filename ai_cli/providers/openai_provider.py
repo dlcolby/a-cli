@@ -56,7 +56,7 @@ class OpenAIProvider(Provider):
 
     def _body(self, model: str, system: str, messages: list[Message], tools, stream: bool) -> dict:
         chat_messages = [{"role": "system", "content": system}] if system else []
-        chat_messages += [{"role": m.role, "content": m.content} for m in messages]
+        chat_messages += self._to_openai_messages(messages)
         body = {"model": self.resolve_model(model), "messages": chat_messages, "stream": stream}
         if tools:
             body["tools"] = [
@@ -67,6 +67,50 @@ class OpenAIProvider(Provider):
                 for t in tools
             ]
         return body
+
+    @staticmethod
+    def _to_openai_messages(messages: list[Message]) -> list[dict]:
+        """Translate our Anthropic-shaped content blocks (see providers/base.py)
+        into Chat Completions' own shape: tool_use blocks become an assistant
+        message's "tool_calls" array, tool_result blocks become separate
+        "tool"-role messages (OpenAI has no user-role tool result, unlike
+        Anthropic) keyed by tool_call_id."""
+        out = []
+        for m in messages:
+            if isinstance(m.content, str):
+                out.append({"role": m.role, "content": m.content})
+                continue
+
+            text_parts, tool_calls, tool_results = [], [], []
+            for block in m.content:
+                btype = block.get("type")
+                if btype == "text":
+                    text_parts.append(block.get("text", ""))
+                elif btype == "tool_use":
+                    tool_calls.append(
+                        {
+                            "id": block["id"],
+                            "type": "function",
+                            "function": {"name": block["name"], "arguments": json.dumps(block.get("input", {}))},
+                        }
+                    )
+                elif btype == "tool_result":
+                    tool_results.append(block)
+
+            if m.role == "assistant":
+                assistant_msg = {"role": "assistant", "content": "".join(text_parts) or None}
+                if tool_calls:
+                    assistant_msg["tool_calls"] = tool_calls
+                out.append(assistant_msg)
+            elif text_parts:
+                out.append({"role": "user", "content": "".join(text_parts)})
+
+            for tr in tool_results:
+                content = tr.get("content", "")
+                if tr.get("is_error"):
+                    content = f"Error: {content}"
+                out.append({"role": "tool", "tool_call_id": tr["tool_use_id"], "content": content})
+        return out
 
     def send(
         self,

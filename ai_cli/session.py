@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import colors
+from .providers.base import content_to_text
 
 SESSIONS_DIRNAME = "mobile_sessions"
 PROJECT_MARKERS = ("AGENTS.md", "CLAUDE.md", ".opencode", SESSIONS_DIRNAME)
@@ -197,7 +198,7 @@ def _write_markdown_mirror(session: Session, md_path: Path) -> None:
     for msg in session.messages:
         lines.append(f"**{msg['role']}:**")
         lines.append("")
-        lines.append(msg["content"])
+        lines.append(content_to_text(msg["content"]))
         lines.append("")
     tmp_path = md_path.with_suffix(".md.tmp")
     tmp_path.write_text("\n".join(lines), encoding="utf-8")
@@ -215,7 +216,7 @@ def format_transcript(session: Session) -> str:
     lines = []
     for msg in session.messages:
         color = colors.USER if msg["role"] == "user" else colors.ASSISTANT
-        lines.append(colors.wrap(f"[{msg['role']}] {msg['content']}", color))
+        lines.append(colors.wrap(f"[{msg['role']}] {content_to_text(msg['content'])}", color))
     return "\n\n".join(lines)
 
 

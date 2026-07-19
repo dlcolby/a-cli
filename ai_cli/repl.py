@@ -10,16 +10,16 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from . import colors, config as config_mod
+from . import agent_tools, colors, config as config_mod
 from . import memory, naming, session as session_mod, skills as skills_mod, ui
 from .commands import loader as command_loader
 from .commands.markdown_command import discover_commands
 from .context import AppContext
-from .providers.base import Message, ToolCall
+from .providers.base import Message, ToolCall, content_to_text, text_block, tool_result_block, tool_use_block
 from .providers.registry import CHEAP_MODEL_BY_PROVIDER, create_provider
 from .skills import READ_SKILL_TOOL
 
-MAX_TOOL_ROUNDS = 4  # generous ceiling against a runaway read_skill loop
+MAX_TOOL_ROUNDS = 12  # generous ceiling against a runaway agentic loop (read/write/run, not just read_skill)
 
 
 def build_context(cwd: Path, provider_override: Optional[str], model_override: Optional[str]) -> AppContext:
@@ -65,12 +65,50 @@ def build_context(cwd: Path, provider_override: Optional[str], model_override: O
     )
 
 
+AGENT_TOOLS_PROMPT_BLOCK = (
+    "You have read_file/write_file/run_command tools scoped to the current project root. "
+    "Paths are relative to that root. write_file and run_command will ask the user to confirm "
+    "before they run — if the user declines, treat that as a hard stop for that action, not "
+    "something to retry a different way."
+)
+
+
 def system_prompt(ctx: AppContext) -> str:
     parts = [memory.load_memory_block(ctx.cwd, ctx.bookmark_root, ctx.project_dir)]
     skills_block = skills_mod.skills_system_prompt_block(ctx.skills)
     if skills_block:
         parts.append(skills_block)
+    parts.append(AGENT_TOOLS_PROMPT_BLOCK)
     return "\n\n".join(p for p in parts if p)
+
+
+def _confirm(prompt: str) -> bool:
+    reply = input(colors.wrap(f"{prompt} [y/N] ", colors.SYSTEM)).strip().lower()
+    return reply in ("y", "yes")
+
+
+def _run_tool_call(ctx: AppContext, root: Path, tc: ToolCall) -> dict:
+    """Execute a single tool call and return its tool_result block. Never
+    raises — failures (including a declined confirmation) become an
+    is_error tool_result so the model sees them and can react, rather than
+    crashing the chat turn."""
+    if tc.name == "read_skill":
+        content = skills_mod.read_skill(ctx.skills, tc.input.get("name", ""))
+        return tool_result_block(tc.id, content)
+
+    if tc.name not in (t.name for t in agent_tools.AGENT_TOOLS):
+        return tool_result_block(tc.id, f"Unknown tool '{tc.name}'", is_error=True)
+
+    description = agent_tools.describe_tool_call(tc.name, tc.input)
+    print(colors.wrap(f"[tool] {description}", colors.SYSTEM))
+    if tc.name in agent_tools.CONFIRM_BEFORE_NAMES and not _confirm(f"Allow {description}?"):
+        return tool_result_block(tc.id, "User declined to run this tool call.", is_error=True)
+
+    try:
+        content = agent_tools.execute_tool(root, tc.name, tc.input)
+        return tool_result_block(tc.id, content)
+    except agent_tools.ToolError as exc:
+        return tool_result_block(tc.id, str(exc), is_error=True)
 
 
 def send_turn(ctx: AppContext, user_text: str, override_model: Optional[str] = None) -> None:
@@ -80,7 +118,10 @@ def send_turn(ctx: AppContext, user_text: str, override_model: Optional[str] = N
     was_first_exchange = len(ctx.session.messages) == 0
     ctx.session.messages.append({"role": "user", "content": user_text})
     model = override_model or ctx.model
-    tools = [READ_SKILL_TOOL] if ctx.skills else None
+    agent_root = ctx.project_dir or ctx.bookmark_root
+    tools = list(agent_tools.AGENT_TOOLS)
+    if ctx.skills:
+        tools.append(READ_SKILL_TOOL)
 
     for _ in range(MAX_TOOL_ROUNDS):
         messages = [Message(role=m["role"], content=m["content"]) for m in ctx.session.messages]
@@ -99,24 +140,20 @@ def send_turn(ctx: AppContext, user_text: str, override_model: Optional[str] = N
                 return
 
         print(colors.RESET)  # newline after streamed text, closing the color span
-        if assistant_text:
-            ctx.session.messages.append({"role": "assistant", "content": "".join(assistant_text)})
+        text = "".join(assistant_text)
+        if tool_calls:
+            blocks = ([text_block(text)] if text else []) + [
+                tool_use_block(tc.id, tc.name, tc.input) for tc in tool_calls
+            ]
+            ctx.session.messages.append({"role": "assistant", "content": blocks})
+        elif text:
+            ctx.session.messages.append({"role": "assistant", "content": text})
 
         if not tool_calls:
             break
 
-        # Simplified tool exchange: represented as synthetic text turns rather
-        # than provider-native structured tool_use/tool_result blocks (see
-        # providers/base.py Message docstring). Good enough for a single
-        # read-only tool; would need real structured content for richer tools.
-        for tc in tool_calls:
-            if tc.name == "read_skill":
-                result = skills_mod.read_skill(ctx.skills, tc.input.get("name", ""))
-            else:
-                result = f"Unknown tool '{tc.name}'"
-            ctx.session.messages.append(
-                {"role": "user", "content": f"[Tool result for {tc.name}({tc.input})]\n{result}"}
-            )
+        result_blocks = [_run_tool_call(ctx, agent_root, tc) for tc in tool_calls]
+        ctx.session.messages.append({"role": "user", "content": result_blocks})
     else:
         print("\n[warning] tool-call loop hit its round limit; stopping]")
 
@@ -124,7 +161,8 @@ def send_turn(ctx: AppContext, user_text: str, override_model: Optional[str] = N
         try:
             cheap_model = CHEAP_MODEL_BY_PROVIDER.get(ctx.provider_name, model)
             assistant_reply = next(
-                (m["content"] for m in reversed(ctx.session.messages) if m["role"] == "assistant"), ""
+                (content_to_text(m["content"]) for m in reversed(ctx.session.messages) if m["role"] == "assistant"),
+                "",
             )
             title = naming.suggest_title(ctx.provider, cheap_model, user_text, assistant_reply)
             ctx.session.title = title

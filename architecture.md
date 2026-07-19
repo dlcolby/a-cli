@@ -69,36 +69,56 @@ GitHub repo (`dlcolby/a-cli`) cloned directly on-device via `lg2 clone`. `bootst
 
 Note: an earlier version of this plan described a conversational `/setup` onboarding command (LLM-guided folder picking / scaffolding). **This was never implemented** — first-run setup is a plain sequential prompt (API key, then folder path), not an LLM-driven flow. Revisit if that gap turns out to matter in practice.
 
-## Agentic capability (in progress, 2026-07)
+## Agentic capability (implemented, 2026-07-19)
 
-Goal: give `aic` enough capability to read/write files and (if feasible) execute
-commands, so it can test and fix its own code rather than being read-only.
+Goal: give `aic` enough capability to read/write files and execute commands, so
+it can test and fix its own code rather than being read-only. Built in two
+parts — a structured tool-call loop, and the tools themselves.
 
 **Execution feasibility, confirmed on-device (spike 4, `tests/spikes/spike4_execute.py`):**
 `subprocess.run`/`Popen` (including `shell=True`) and `os.system`/`os.popen` all
 work in a-shell's Python. **`os.fork()` does not** — it triggers a Fatal Python
 error (`PyMutex_Unlock: unlocking mutex that is not locked`) that hangs the
 entire a-shell app with no catchable exception; recovery requires force-quitting
-a-shell. `multiprocessing.Process` was not re-tested after that crash but is
-ruled out by the same finding, since its default POSIX start method is
-fork-based. **Design rule: a future `run_command` tool must be built exclusively
-on `subprocess.run`/`Popen`; `os.fork` and `multiprocessing` must never be
-reachable from it.**
+a-shell. `multiprocessing.Process` is ruled out by the same finding, since its
+default POSIX start method is fork-based. **Design rule, enforced in
+`agent_tools.py`: `run_command` is built exclusively on `subprocess.run`; never
+`os.fork`/`multiprocessing`.**
 
-Planned tool set (not yet built): `read_file`, `write_file` (or edit-with-diff),
-`run_command` — all scoped to `project_dir` (or an explicit allowlisted root),
-never the wider filesystem, mirroring the secrets-isolation guard already in
-`config.py`. Write/execute should prompt for confirmation rather than
-auto-running, since the tool would be capable of editing `aic`'s own source
-while it's running.
+**`Message.content` is now `str | list[dict]`** (`providers/base.py`): plain
+text turns stay a string (no behavior change, no format churn in existing
+sessions); turns involving tool use carry a list of content blocks mirroring
+Anthropic's own native shape (`text`/`tool_use`/`tool_result` blocks, via the
+`text_block()`/`tool_use_block()`/`tool_result_block()` helpers). Anthropic's
+`_body()` passes this through unchanged since it's already Anthropic's wire
+format. `OpenAIProvider._to_openai_messages()` translates it into Chat
+Completions' own shape instead — an assistant message's `tool_calls` array for
+`tool_use` blocks, and separate `"tool"`-role messages (keyed by
+`tool_call_id`) for `tool_result` blocks, since OpenAI has no user-role tool
+result the way Anthropic does. `content_to_text()` flattens either shape back
+to a plain string for the session's markdown mirror, `/session switch`'s
+transcript reprint, and auto-naming — none of those need block-level
+structure, just human-readable text.
 
-Also needed before richer tools land: the tool-call loop in `repl.py` currently
-represents tool results as synthetic text turns appended to `Message.content`
-(a plain string — see the docstring in `providers/base.py`). That was called
-"good enough for one read-only tool" when only `read_skill` existed; multiple
-tool types in one turn will need real structured tool_use/tool_result content
-instead, or multi-tool sequences will lose track of which result answers which
-call.
+**Tool set** (`agent_tools.py`): `read_file`, `write_file`, `run_command`, all
+scoped to `project_dir` (or `bookmark_root` if there's no project) via
+`_resolve_scoped_path()` — a path that resolves outside that root raises
+`ToolError` rather than running, the same instinct as the secrets-isolation
+guard in `config.py`. `write_file` and `run_command` are gated in `repl.py`'s
+`_run_tool_call()` behind an interactive `y/N` confirmation (plain `input()`,
+called after `ui.py`'s `prompt_toolkit` `Application` has already returned for
+that turn, so there's no terminal-mode conflict) before they execute — a
+declined call becomes an `is_error` tool_result the model sees, not a crash.
+`read_file`/`read_skill` need no confirmation. `MAX_TOOL_ROUNDS` raised from 4
+to 12 to allow real read→write→run sequences instead of just one skill lookup.
+
+Not yet done: no opt-out toggle to disable agent tools entirely (e.g. for a
+read-only chat session) — every turn currently offers the model file
+read/write/run capability, protected only by the confirmation gate. Revisit if
+that turns out to matter in practice. Also not yet device-tested — spike 4
+validated the underlying `subprocess` primitives on-device, but the tool loop
+itself (confirmation prompt behavior, `run_command` in a-shell specifically)
+has only been exercised via the PC test suite so far.
 
 ## Known issues / open actions
 

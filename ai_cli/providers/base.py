@@ -15,11 +15,49 @@ from typing import Iterator, Optional
 @dataclass
 class Message:
     role: str  # "user" | "assistant"
-    # v1 keeps this a plain string. Tool-call/tool-result exchanges are
-    # represented as synthetic text turns (see skills.py / repl.py's tool loop)
-    # rather than provider-native structured content blocks, to avoid needing
-    # a different Message shape per provider. Revisit if richer tool use is added.
-    content: str
+    # Plain text turns keep content as a str. Turns involving tool use carry a
+    # list of content blocks instead, mirroring Anthropic's native block shape
+    # (each dict has a "type": "text" | "tool_use" | "tool_result", plus that
+    # type's fields — see the *_block() helpers below). Anthropic's wire format
+    # accepts this shape directly; OpenAIProvider translates it to Chat
+    # Completions' tool_calls/"tool"-role-message shape in its own _body().
+    content: str | list[dict]
+
+
+def text_block(text: str) -> dict:
+    return {"type": "text", "text": text}
+
+
+def tool_use_block(id: str, name: str, input: dict) -> dict:
+    return {"type": "tool_use", "id": id, "name": name, "input": input}
+
+
+def tool_result_block(tool_use_id: str, content: str, is_error: bool = False) -> dict:
+    block = {"type": "tool_result", "tool_use_id": tool_use_id, "content": content}
+    if is_error:
+        block["is_error"] = True
+    return block
+
+
+def content_to_text(content: str | list[dict]) -> str:
+    """Flatten either shape of Message.content into a plain string, for
+    contexts that only care about human-readable text: the session's markdown
+    mirror, /session switch's transcript reprint, and session auto-naming."""
+    if isinstance(content, str):
+        return content
+    parts = []
+    for block in content:
+        btype = block.get("type")
+        if btype == "text":
+            parts.append(block.get("text", ""))
+        elif btype == "tool_use":
+            parts.append(f"[tool call] {block.get('name')}({block.get('input')})")
+        elif btype == "tool_result":
+            label = "tool error" if block.get("is_error") else "tool result"
+            parts.append(f"[{label}] {block.get('content', '')}")
+        else:
+            parts.append(str(block))
+    return "\n".join(parts)
 
 
 @dataclass
