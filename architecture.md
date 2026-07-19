@@ -162,11 +162,48 @@ per-call overrides to `session.prompt()` (not mutating session state, so
 nothing needs restoring) and detaches `_sync_mouse_state` from
 `self.session.app.on_invalidate` for the duration of the call, re-attaching it
 in the `finally` — so nothing can flip mouse support mid-call regardless of
-completion state. Covered by new regression tests in
-`tests/test_ui_mouse_hook.py` (`test_confirm_disables_completion_for_this_call`,
-`test_confirm_detaches_and_reattaches_auto_mouse_hook`). **Still not
-device-confirmed** — this is now two device round-trips into the same code
-path; treat it as reasoned-but-unverified until the user reports back.
+completion state.
+
+**Fix v2 also failed on-device (2026-07-19, third round-trip), proving the
+whole strategy wrong, not just a detail of it.** Two separate on-device runs
+of the *same* v2 code: first run, the confirm succeeded (typed `y`, model
+started responding) but a-shell then hard-crashed with no traceback at all
+during/after the follow-up response — and because saving only happened at
+the very end of `send_turn()`, the entire exchange (including the user's
+original request) was lost on reopen. Second run, same command, crashed
+immediately at the confirmation prompt itself with the *exact same* `OSError:
+[Errno 22] Invalid argument` at the *exact same line* (`ui.py`'s
+`self.session.prompt(...)` inside `confirm()`) as fix v1 — despite the
+completer/mouse-hook fix. That recurrence is the key data point: it means the
+v1 diagnosis (dropdown → mouse-hook mismatch) wasn't the real root cause, or
+at best was only one of several. The one constant across all three device
+round-trips is calling `Application.run()` (via `session.prompt()`) a second
+time within the same process mid-turn — sometimes it hangs (pre-fix bare
+`input()`, if the terminal was left in a state `input()` couldn't read),
+sometimes it raises `EINVAL` from `selectors.py`'s kqueue-based reader
+registration, sometimes it corrupts state invisibly until a *later* crash
+with no traceback. **Conclusion: a second nested `Application.run()`
+mid-turn is unreliable on a-shell's asyncio+kqueue combination, full stop —
+not a bug to patch around, a strategy to abandon.**
+
+**Fix v3 (current): stop touching `prompt_toolkit`'s `Application` for this
+at all.** `Repl_UI.confirm()` is gone, replaced by `Repl_UI.disable_mouse_now()`
+— a pure output-level escape-code write + flush, not a run loop, so it can't
+hit the kqueue issue. `repl.py`'s `_confirm()` now: calls
+`ctx.repl_ui.disable_mouse_now()` if a UI is attached, then — since the v1
+hang shows the terminal can't be trusted to already be in a normal
+(canonical+echo) state after a prior `Application.run()` — explicitly forces
+it there itself via `termios.tcsetattr()` (guarded by `try/except
+ImportError` at module scope, since `termios` doesn't exist on the Windows PC
+running the test suite), then falls back to a plain `input()` call, restoring
+the original terminal attributes in a `finally`. Covered by
+`tests/test_repl_tool_loop.py`'s `test_confirm_forces_canonical_echo_mode_when_termios_available`
+and `test_confirm_skips_termios_when_unavailable`. Also added incremental
+`session_mod.save_session()` calls after every message append in `send_turn()`
+(previously only saved once, at the very end) so a crash anywhere mid-turn —
+whatever eventually causes it — no longer loses the whole exchange. **Still
+not device-confirmed** — this is the third attempt at this exact code path;
+don't treat it as resolved until confirmed on a real phone.
 
 ## Known issues / open actions
 
@@ -178,7 +215,7 @@ path; treat it as reasoned-but-unverified until the user reports back.
 2. **OneDrive `pickFolder` folder-selection is unsupported** — see dedicated section above. Working around it with a local folder; Graph API integration is the real fix, not started.
 3. **OpenAI provider path is implemented but not yet device-tested** — only the Anthropic path has been exercised live on the phone so far (`/model openai:...` and the OpenAI SSE parsing are covered by unit tests, not a real on-device call).
 4. **`/setup` conversational onboarding described in early planning was never built** (see Distribution note above) — not currently a gap the user has asked to fill, noted for completeness.
-5. **Tool-confirmation prompt fix needs on-device re-test — OPEN.** See "Confirmation prompt hard-hung a-shell on-device" above: `_confirm()` now goes through `Repl_UI.confirm()` (same `PromptSession`) instead of bare `input()`. Reasoned fix, not yet confirmed against the actual on-device hang.
+5. **Tool-confirmation prompt: three device round-trips, still OPEN.** See "Confirmation prompt hard-hung a-shell on-device" above for the full history. v1 (nested `session.prompt()`) and v2 (v1 + completer/mouse-hook fix) both failed on-device with variations of the same `EINVAL`/hard-crash pattern — the nested-`Application.run()` strategy itself was the problem, not a fixable detail of it. v3 abandons `prompt_toolkit` for this entirely (raw `termios` + `input()`) and adds incremental session saving so a future crash, whatever causes it, doesn't lose the whole exchange. Not yet re-tested on a real phone.
 
 ## Verification approach
 

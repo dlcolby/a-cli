@@ -25,8 +25,6 @@ mode between turns.
 
 from __future__ import annotations
 
-from html import escape as _html_escape
-
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import FuzzyCompleter, NestedCompleter, WordCompleter
 from prompt_toolkit.formatted_text import HTML
@@ -147,47 +145,17 @@ class Repl_UI:
                 self.session.app.output.flush()
                 self._mouse_currently_on = False
 
-    def confirm(self, prompt: str) -> bool:
-        """y/N confirmation for write_file/run_command tool calls, routed
-        through this same PromptSession instead of a bare input() call.
-
-        Device report (2026-07): plain input() for this prompt hard-hung
-        a-shell (no echo, unrecoverable) when a tool call needed confirming.
-        repl.py's original comment assumed "no terminal-mode conflict" since
-        the Application had already returned for the turn — that assumption
-        was never actually verified on-device and this report shows it's
-        false, most likely because a-shell's terminal is left in whatever
-        raw-mode/mouse-tracking state prompt_toolkit set up, which a bare
-        input() doesn't know how to negotiate. Reusing session.prompt() here
-        keeps confirmation on the one input path that's confirmed working
-        on a real device.
-
-        Follow-up device report: that first attempt still crashed — typing
-        "y" popped a completion dropdown (this call left self.session's live
-        NestedCompleter + complete_while_typing=True attached from the last
-        regular prompt, and FuzzyCompleter matches almost anything against a
-        single character), which then fired the _sync_mouse_state
-        on_invalidate hook. That hook doesn't know this call asked for
-        mouse_support=False, so it called enable_mouse_support() on an
-        Application explicitly configured without mouse support — that
-        mismatch is the likely cause of the EINVAL crash in prompt_toolkit's
-        input-registration code. Fix: disable completion for this call
-        (per-call kwargs, not mutating session state) and detach the
-        auto-mouse hook for the duration so nothing can flip mouse support
-        mid-run regardless of dropdown state."""
+    def disable_mouse_now(self) -> None:
+        """Force mouse tracking off via a raw escape-code write, with no
+        Application involved — used by repl.py's tool-confirmation prompt,
+        which deliberately avoids calling session.prompt() a second time
+        mid-turn. See repl.py's _confirm() docstring: nesting a second
+        Application.run() call within the same process was confirmed
+        on-device to crash intermittently (OSError: Errno 22 from
+        selectors.py's kqueue-based reader registration), so the
+        confirmation prompt no longer touches the Application at all —
+        it only needs this output-level mouse toggle, which is a plain
+        buffered write+flush, not a run loop."""
         self.session.app.output.disable_mouse_support()
         self.session.app.output.flush()
         self._mouse_currently_on = False
-        self.session.app.on_invalidate -= self._sync_mouse_state
-        message = HTML(f"<b><ansiyellow>{_html_escape(prompt)} [y/N] </ansiyellow></b>")
-        try:
-            reply = self.session.prompt(
-                message, mouse_support=False, completer=None, complete_while_typing=False
-            )
-        finally:
-            self.session.app.on_invalidate += self._sync_mouse_state
-            if self.ctx.mouse_mode == "auto":
-                self.session.app.output.disable_mouse_support()
-                self.session.app.output.flush()
-                self._mouse_currently_on = False
-        return reply.strip().lower() in ("y", "yes")
