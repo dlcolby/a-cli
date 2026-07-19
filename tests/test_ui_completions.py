@@ -49,3 +49,24 @@ def test_session_id_no_longer_bakes_in_title_slug(tmp_path):
     ctx = _make_ctx(tmp_path)
     s = session_mod.create_session(ctx.cwd, ctx.bookmark_root, "anthropic", "sonnet", global_scope=True)
     assert "untitled" not in s.id
+
+
+def test_ordinary_chat_text_gets_no_completions(tmp_path):
+    # Regression: FuzzyCompleter matches a single typed character against
+    # ANY top-level command name by subsequence (e.g. "e" fuzzy-matches
+    # "/help", "/session", "/memory", ...) -- with complete_while_typing=True
+    # that popped a dropdown on almost every keystroke of plain chat text,
+    # not just slash commands (device report, 2026-07-19).
+    ctx = _make_ctx(tmp_path)
+    completer = ui.build_completer(ctx)
+    for text in ("e", "y", "hello there", "what files exist"):
+        doc = Document(text, cursor_position=len(text))
+        assert list(completer.get_completions(doc, None)) == []
+
+
+def test_slash_command_text_still_gets_completions(tmp_path):
+    ctx = _make_ctx(tmp_path)
+    completer = ui.build_completer(ctx)
+    doc = Document("/mo", cursor_position=len("/mo"))
+    completions = {c.text for c in completer.get_completions(doc, None)}
+    assert "/model" in completions

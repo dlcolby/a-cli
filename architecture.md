@@ -44,7 +44,9 @@ The user runs OpenCode as their agentic coding/brainstorming CLI on PC and wante
   <project>/mobile_sessions/<id>.json   # PROJECT-scoped sessions — only visible when cwd is under <project>
 ```
 
-Session scoping: `/session list` shows the nearest `mobile_sessions/` walking up from cwd to `bookmark_root`, plus the bookmark-root-level one (global, always visible). A project directory is recognized by containing `AGENTS.md`, `CLAUDE.md`, `.opencode/`, or an existing `mobile_sessions/`.
+Session scoping: `/session list` shows the nearest `mobile_sessions/` walking up from cwd to `bookmark_root`, plus the bookmark-root-level one (global, always visible). A project directory is recognized by containing `AGENTS.md`, `CLAUDE.md`, `.opencode/`, `.git/`, or an existing `mobile_sessions/`.
+
+**Expected: a fresh clone loses sessions but keeps config/secrets.** If `bookmark_root` (or a project under it) is itself a git-managed clone of a repo — e.g. using the a-cli repo's own working copy as a project directory, which is how it's actually been dogfooded — then a `lg2 clone`/reclone of that repo wipes `mobile_sessions/*.json` (it's gitignored, never committed, so a fresh clone naturally starts without it) while `~/Documents/.mobilecli/secrets.json`/`config.json` (API keys, default provider/model, the `bookmark_root` path itself) are untouched, since they live entirely outside the cloned repo. This is by design, not a bug — session history for a project stored this way doesn't survive a reclone of that project's own repo.
 
 ## Repo layout (`ai_cli/` package)
 
@@ -248,10 +250,36 @@ a-shell's console (as happened with one of the v2 crashes) still leaves a
 trace on disk. See `tests/spikes/debug_logs/README.md` for the exact
 commands to capture and commit a trace after reproducing an issue.
 
-**Still not device-confirmed** — this is the fourth attempt at this exact
-code path; don't treat it as resolved until confirmed on a real phone. If it
-fails again, the `AIC_DEBUG_LOG` trace should make the next diagnosis much
-less speculative than the last four have been.
+**v4 also froze on-device (2026-07-19, fifth round-trip) — and this time the
+`AIC_DEBUG_LOG` trace actually paid off.** The trace shows:
+```
+_confirm: captured live termios lflag=392
+_confirm: restored pristine termios lflag=392
+_confirm: calling input()
+<nothing after — froze here>
+```
+**The live and pristine `lflag` values are identical.** The terminal was
+never in a different raw-mode state to begin with — termios was never the
+actual variable across any of v1/v3/v4 (all three are "call `input()`
+[optionally with some termios tweak] after a `prompt_toolkit` `Application`
+has run at least once in the process," and all three hang identically
+regardless of what termios says). The one thing every hang shares, and the
+one thing that's actually confirmed to receive input on this device
+(streaming, completion dropdowns, multi-turn `prompt()` calls), is
+`prompt_toolkit`'s own `asyncio`-integrated `Application.run()`. Best current
+theory: a-shell's terminal likely only delivers keystrokes into the process
+while something has an active `asyncio` reader registered on the fd (i.e.
+while a `prompt_toolkit` `Application` is actually running) — a plain
+blocking `input()`/`read()` outside that may simply never get serviced,
+hanging forever with nothing to catch, which is exactly what's been observed
+three separate times now. v2's approach (nested `session.prompt()`) was the
+only one that actually used that mechanism, but it always reused the *same*
+`self.session`/`Application` object, which crashed on re-registering a
+reader for the same fd — untested variant: a genuinely fresh, independent
+`PromptSession()` (not reusing `self.session`) for the confirmation might
+avoid that specific crash if it's about Python-object-level reuse rather
+than a true OS-level fd conflict. Not yet tried. See Known Issues #5 for
+where this stands and the options being considered next.
 
 ## Known issues / open actions
 
@@ -263,7 +291,9 @@ less speculative than the last four have been.
 2. **OneDrive `pickFolder` folder-selection is unsupported** — see dedicated section above. Working around it with a local folder; Graph API integration is the real fix, not started.
 3. **OpenAI provider path is implemented but not yet device-tested** — only the Anthropic path has been exercised live on the phone so far (`/model openai:...` and the OpenAI SSE parsing are covered by unit tests, not a real on-device call).
 4. **`/setup` conversational onboarding described in early planning was never built** (see Distribution note above) — not currently a gap the user has asked to fill, noted for completeness.
-5. **Tool-confirmation prompt: four device round-trips, still OPEN.** See "Confirmation prompt hard-hung a-shell on-device" above for the full history — v1 (nested `session.prompt()`), v2 (v1 + completer/mouse-hook fix), and v3 (raw `termios` patch on live attrs) each failed differently on-device (hang, `EINVAL` crash, hang again). v4 restores a full pristine `termios` snapshot instead of patching live attrs, and `ai_cli/debug_log.py` now gives a way to get an actual on-device trace (set `AIC_DEBUG_LOG=<path>`, reproduce, commit the log under `tests/spikes/debug_logs/`) instead of reasoning blind from crash reports alone. Not yet re-tested on a real phone.
+5. **Tool-confirmation prompt: five device round-trips, still OPEN.** See "Confirmation prompt hard-hung a-shell on-device" above for the full history. v1/v3/v4 (all `input()`-based, with/without termios tweaks) all hang identically, and the `AIC_DEBUG_LOG` trace from v4 proves termios isn't the variable — the terminal's raw-mode state was identical before and after. v2 (nested `session.prompt()` reusing the same `PromptSession`) is the only approach that's used a mechanism actually confirmed to receive input on this device, but it crashed on re-registering a reader for the same fd. Leading theory: a-shell may only service reads while an `asyncio` reader is actively registered (i.e. only inside a running `prompt_toolkit` `Application`) — a bare blocking read never gets serviced at all. Untested next step: a genuinely fresh, independent `PromptSession` for the confirmation (not reusing `self.session`, unlike v2) — this hasn't actually been tried; v2 only tested "reuse the same session object," not "nested Application in general." Alternative under consideration if that fails too: restructure the confirmation to defer to the *next* normal chat turn (typed as an ordinary message through the main loop's already-reliable `prompt()`) instead of a nested synchronous read at all, which would sidestep this whole class of bug at the cost of a slightly different interaction — press pause on this pending explicit user input.
+6. **Ordinary chat text triggered a completion dropdown on every keystroke — FIXED, 2026-07-19.** `FuzzyCompleter` matches a single typed character against any top-level command name by subsequence (e.g. "e" fuzzy-matches "/help", "/session", "/memory", ...), and `complete_while_typing=True` meant this fired on nearly every keystroke of plain chat text, not just slash commands. Fixed with `ui._SlashOnlyCompleter`, which only delegates to the real completer when the buffer starts with `/`. Not yet device-confirmed.
+7. **Project detection silently regressed after a fresh clone — FIXED, 2026-07-19.** `PROJECT_MARKERS` didn't include `.git`, only `AGENTS.md`/`CLAUDE.md`/`.opencode`/`mobile_sessions`. When the a-cli repo itself is used as a project under `bookmark_root`, it was only recognized as a project once `mobile_sessions/` already existed there from a prior session — but that dir is gitignored, so a fresh `lg2 clone` lost the marker, project detection silently fell back to "no project," and `read_file`/`write_file`/`run_command` then resolved paths against `bookmark_root` instead of the actual project directory (symptom: the model couldn't find `README.md` even though it existed, and tried to `find` for it — which itself then hit issue #5's confirmation freeze). Fixed by adding `.git` to `PROJECT_MARKERS`, matching OpenCode's own convention and not depending on ephemeral, gitignored state.
 
 ## Verification approach
 

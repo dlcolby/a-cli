@@ -15,6 +15,22 @@ def test_project_dir_found_via_agents_md(tmp_path):
     assert found == project
 
 
+def test_project_dir_found_via_git(tmp_path):
+    # Regression: a git-managed project directory used to only be recognized
+    # once a mobile_sessions/ dir already existed there -- but that dir is
+    # gitignored, so a fresh clone lost the marker and project detection
+    # silently fell back to bookmark_root, breaking agent-tool path
+    # resolution (read_file etc. looked in the wrong directory).
+    bookmark = tmp_path / "bookmark"
+    project = bookmark / "some-repo"
+    (project / ".git").mkdir(parents=True)
+    nested = project / "subdir"
+    nested.mkdir()
+
+    found = session_mod.find_project_dir(nested, bookmark)
+    assert found == project
+
+
 def test_no_project_dir_when_no_markers(tmp_path):
     bookmark = tmp_path / "bookmark"
     loose = bookmark / "scratch"

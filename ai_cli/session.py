@@ -26,7 +26,15 @@ from . import colors
 from .providers.base import content_to_text
 
 SESSIONS_DIRNAME = "mobile_sessions"
-PROJECT_MARKERS = ("AGENTS.md", "CLAUDE.md", ".opencode", SESSIONS_DIRNAME)
+# ".git" was added 2026-07-19: without it, a git-managed project directory
+# (e.g. this repo itself, when used as a project under bookmark_root) is only
+# recognized once a mobile_sessions/ dir already exists there — but that dir
+# is gitignored, so a fresh clone loses it and project detection silently
+# regresses to "no project," which then resolves agent-tool paths (read_file
+# etc.) against bookmark_root instead of the actual project dir. .git is a
+# non-ephemeral, git-tracked-independent signal that doesn't have this
+# chicken-and-egg problem, and matches OpenCode's own project detection.
+PROJECT_MARKERS = ("AGENTS.md", "CLAUDE.md", ".opencode", ".git", SESSIONS_DIRNAME)
 
 
 @dataclass

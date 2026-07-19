@@ -26,7 +26,7 @@ mode between turns.
 from __future__ import annotations
 
 from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import FuzzyCompleter, NestedCompleter, WordCompleter
+from prompt_toolkit.completion import Completer, FuzzyCompleter, NestedCompleter, WordCompleter
 from prompt_toolkit.formatted_text import HTML
 
 from . import session as session_mod
@@ -64,7 +64,24 @@ def _session_words(ctx) -> WordCompleter:
     return WordCompleter(ids, ignore_case=True, WORD=True, display_dict=display)
 
 
-def build_completer(ctx) -> FuzzyCompleter:
+class _SlashOnlyCompleter(Completer):
+    """Only delegate to the wrapped completer when the buffer starts with
+    '/'. Without this, FuzzyCompleter matches a single typed character
+    against ANY top-level command name by subsequence (e.g. "e" fuzzy-matches
+    "/help", "/session", "/memory", ...), so with complete_while_typing=True
+    a dropdown popped open on almost every keystroke of ordinary chat text,
+    not just slash commands (device report, 2026-07-19)."""
+
+    def __init__(self, inner: Completer):
+        self.inner = inner
+
+    def get_completions(self, document, complete_event):
+        if not document.text_before_cursor.lstrip().startswith("/"):
+            return
+        yield from self.inner.get_completions(document, complete_event)
+
+
+def build_completer(ctx) -> Completer:
     nested = {}
     for name in all_command_names(ctx):
         nested[f"/{name}"] = None
@@ -81,7 +98,7 @@ def build_completer(ctx) -> FuzzyCompleter:
     nested["/memory"] = {"append": None}
     nested["/mouse"] = {"auto": None, "on": None, "off": None}
 
-    return FuzzyCompleter(NestedCompleter.from_nested_dict(nested))
+    return _SlashOnlyCompleter(FuzzyCompleter(NestedCompleter.from_nested_dict(nested)))
 
 
 class Repl_UI:
