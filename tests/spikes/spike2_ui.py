@@ -2,7 +2,7 @@
 terminal, and specifically can you SELECT an item by tapping it with your
 finger (vs. needing the keyboard's arrow keys + return)?
 
-Run: python3 spikes/spike2_ui.py
+Run: python3 tests/spikes/spike2_ui.py
 
 Type a letter (e.g. "a") to trigger the dropdown showing alpha/beta/gamma,
 then try tapping "alpha" directly. Report back: did the dropdown appear at

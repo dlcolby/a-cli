@@ -2,7 +2,7 @@
 
 Run this from INSIDE the bookmarked OneDrive folder:
   cd <bookmarked-folder>
-  python3 ~/Documents/a-cli/spikes/spike3_onedrive.py
+  python3 ~/Documents/a-cli/tests/spikes/spike3_onedrive.py
 
 It writes a-cli-test.txt here — check on your PC that it shows up in OneDrive
 with the right content. Then, separately: create a file called

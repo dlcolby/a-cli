@@ -1,6 +1,6 @@
 """Spike 1a: does outbound HTTPS from a-shell's Python work at all?
 
-Run: python3 spikes/spike1_network.py
+Run: python3 tests/spikes/spike1_network.py
 
 A fake API key is fine here — we're only testing connectivity/TLS, not auth.
 PASS: a real HTTP response with a status code and a JSON error body (e.g. 401
