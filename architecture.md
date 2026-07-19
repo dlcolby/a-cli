@@ -69,6 +69,37 @@ GitHub repo (`dlcolby/a-cli`) cloned directly on-device via `lg2 clone`. `bootst
 
 Note: an earlier version of this plan described a conversational `/setup` onboarding command (LLM-guided folder picking / scaffolding). **This was never implemented** — first-run setup is a plain sequential prompt (API key, then folder path), not an LLM-driven flow. Revisit if that gap turns out to matter in practice.
 
+## Agentic capability (in progress, 2026-07)
+
+Goal: give `aic` enough capability to read/write files and (if feasible) execute
+commands, so it can test and fix its own code rather than being read-only.
+
+**Execution feasibility, confirmed on-device (spike 4, `tests/spikes/spike4_execute.py`):**
+`subprocess.run`/`Popen` (including `shell=True`) and `os.system`/`os.popen` all
+work in a-shell's Python. **`os.fork()` does not** — it triggers a Fatal Python
+error (`PyMutex_Unlock: unlocking mutex that is not locked`) that hangs the
+entire a-shell app with no catchable exception; recovery requires force-quitting
+a-shell. `multiprocessing.Process` was not re-tested after that crash but is
+ruled out by the same finding, since its default POSIX start method is
+fork-based. **Design rule: a future `run_command` tool must be built exclusively
+on `subprocess.run`/`Popen`; `os.fork` and `multiprocessing` must never be
+reachable from it.**
+
+Planned tool set (not yet built): `read_file`, `write_file` (or edit-with-diff),
+`run_command` — all scoped to `project_dir` (or an explicit allowlisted root),
+never the wider filesystem, mirroring the secrets-isolation guard already in
+`config.py`. Write/execute should prompt for confirmation rather than
+auto-running, since the tool would be capable of editing `aic`'s own source
+while it's running.
+
+Also needed before richer tools land: the tool-call loop in `repl.py` currently
+represents tool results as synthetic text turns appended to `Message.content`
+(a plain string — see the docstring in `providers/base.py`). That was called
+"good enough for one read-only tool" when only `read_skill` existed; multiple
+tool types in one turn will need real structured tool_use/tool_result content
+instead, or multi-tool sequences will lose track of which result answers which
+call.
+
 ## Known issues / open actions
 
 1. **`/mouse auto` mode does not reliably work — OPEN, unresolved after two fix attempts.** Goal: dynamically enable touch-tap completion selection only while a dropdown is visible, and native terminal scrollback the rest of the time (both rely on the same xterm mouse-tracking mode, so can't be on simultaneously).

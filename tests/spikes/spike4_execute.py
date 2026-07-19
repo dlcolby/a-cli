@@ -16,6 +16,15 @@ Run from inside a-shell:
 Nothing here is destructive — every probe either inspects state or runs a
 harmless, side-effect-free command (echo / listing the cwd). Read the PASS/FAIL
 summary at the end and report it back verbatim.
+
+RESULT (confirmed on-device 2026-07-18): subprocess.run/Popen (incl.
+shell=True) and os.system/os.popen all work. os.fork() is NOT safe — it
+triggers a Fatal Python error ("PyMutex_Unlock: unlocking mutex that is not
+locked") that hangs the whole a-shell app; no exception is raised, so it
+can't be caught, and recovery requires a force-quit of a-shell. The
+os.fork/multiprocessing probes below are gated behind an env var so this
+script no longer hangs a-shell by default — see architecture.md's "Known
+issues" section for the full writeup.
 """
 
 import os
@@ -90,8 +99,16 @@ def main():
     probe("subprocess.run(..., shell=True)", probe_shell_true)
     probe("os.system(...)", probe_os_system)
     probe("os.popen(...)", probe_os_popen)
-    probe("os.fork()", probe_os_fork)
-    probe("multiprocessing.Process", probe_multiprocessing)
+
+    if os.environ.get("SPIKE4_INCLUDE_FORK") == "1":
+        # DANGER: confirmed to hang a-shell with an unrecoverable Fatal Python
+        # error on-device (2026-07-18). Only re-run this deliberately, and be
+        # ready to force-quit a-shell afterward. Off by default.
+        probe("os.fork()", probe_os_fork)
+        probe("multiprocessing.Process", probe_multiprocessing)
+    else:
+        print("Skipping os.fork()/multiprocessing.Process — confirmed to crash a-shell "
+              "(set SPIKE4_INCLUDE_FORK=1 to re-run them deliberately).")
 
     print("\n=== Spike 4 results (execution feasibility in a-shell) ===")
     for label, status, detail in results:
