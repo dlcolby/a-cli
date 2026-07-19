@@ -1,1 +1,8 @@
 2026-07-19T17:54:35.897770+00:00 main: pristine_termios captured=True
+2026-07-19T22:17:31.499910+00:00 main: pristine_termios captured=True
+2026-07-19T22:21:15.079351+00:00 _confirm: start, prompt='Allow run_command(\'find . -iname "README*" -not -path "*/node_modules/*" -not -path "*/.git/*"\')?'
+2026-07-19T22:21:15.079464+00:00 _confirm: mouse disabled
+2026-07-19T22:21:15.079518+00:00 _confirm: termios_available=True, pristine_available=True
+2026-07-19T22:21:15.079586+00:00 _confirm: captured live termios lflag=392
+2026-07-19T22:21:15.079687+00:00 _confirm: restored pristine termios lflag=392
+2026-07-19T22:21:15.079742+00:00 _confirm: calling input()
