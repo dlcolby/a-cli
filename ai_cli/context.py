@@ -25,7 +25,7 @@ class AppContext:
     markdown_commands: dict = field(default_factory=dict)
     should_exit: bool = False
     model_cache: dict = field(default_factory=dict)  # provider_name -> list[ModelInfo], live-queried
-    mouse_enabled: bool = True  # trades touch-select for scrollback; see ui.py docstring
+    mouse_mode: str = "auto"  # "auto" | "on" | "off" — see ui.py docstring
 
     def get_api_key(self, provider_name: str) -> Optional[str]:
         return config_mod.get_api_key(provider_name)

@@ -30,21 +30,28 @@ def test_model_refresh_clears_cache(ctx):
     assert "cleared" in result
 
 
-def test_mouse_toggle_off_and_on(ctx):
-    assert ctx.mouse_enabled is True
+def test_mouse_mode_defaults_to_auto(ctx):
+    assert ctx.mouse_mode == "auto"
+
+
+def test_mouse_mode_switches_between_all_three(ctx):
     result = cmd_mouse(ctx, "off")
-    assert ctx.mouse_enabled is False
-    assert "scrollback restored" in result
+    assert ctx.mouse_mode == "off"
+    assert "scrollback works everywhere" in result
 
     result = cmd_mouse(ctx, "on")
-    assert ctx.mouse_enabled is True
+    assert ctx.mouse_mode == "on"
     assert "tap to select" in result
+
+    result = cmd_mouse(ctx, "auto")
+    assert ctx.mouse_mode == "auto"
+    assert "automatically" in result
 
 
 def test_mouse_invalid_arg_shows_current_state(ctx):
     result = cmd_mouse(ctx, "sideways")
     assert "Usage" in result
-    assert "currently on" in result
+    assert "currently auto" in result
 
 
 def test_session_rename_updates_title_not_id(ctx):
@@ -59,3 +66,28 @@ def test_session_rename_updates_title_not_id(ctx):
 def test_session_rename_without_active_session(ctx):
     result = cmd_session(ctx, "rename whatever")
     assert "No active session" in result
+
+
+def test_session_switch_prints_transcript(ctx):
+    cmd_session(ctx, "new my-session")
+    ctx.session.messages.append({"role": "user", "content": "hello there"})
+    ctx.session.messages.append({"role": "assistant", "content": "hi, how can I help?"})
+    from ai_cli import session as session_mod
+
+    session_mod.save_session(ctx.session)
+    session_id = ctx.session.id
+    ctx.session = None  # simulate a fresh process needing to switch back in
+
+    result = cmd_session(ctx, f"switch {session_id}")
+    assert "Switched to session" in result
+    assert "hello there" in result
+    assert "hi, how can I help?" in result
+
+
+def test_session_switch_reports_no_messages_yet(ctx):
+    cmd_session(ctx, "new empty-session")
+    session_id = ctx.session.id
+    ctx.session = None
+
+    result = cmd_session(ctx, f"switch {session_id}")
+    assert "no messages yet" in result

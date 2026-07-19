@@ -5,14 +5,18 @@ tappable dropdown of commands; '/model ' swaps to a model/provider dropdown;
 mouse_support=True is what makes finger-tap completion selection work, but it
 also captures swipe/scroll gestures for the app instead of the terminal's
 native scrollback (confirmed on-device: tap-to-select works, but scrollback
-stops working while it's on). Since you can't have both at once with a single
-xterm mouse-tracking mode, /mouse off|on lets you switch between them: turn it
-off to scroll back through chat history, on again to tap-select completions.
+stops working while it's on). Since a single xterm mouse-tracking mode can't
+do both, the default "auto" mode toggles the terminal's actual mouse-reporting
+state live: off while you're just typing (scrollback works), on for the brief
+window a completion dropdown is visible (tap-to-select works), off again once
+it closes. /mouse on|off overrides this with the old fixed behavior if the
+dynamic toggling turns out to be unreliable on a given device.
 """
 
 from __future__ import annotations
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.application import get_app
 from prompt_toolkit.completion import FuzzyCompleter, NestedCompleter, WordCompleter
 
 from . import session as session_mod
@@ -40,7 +44,9 @@ def _model_words(ctx) -> WordCompleter:
 
 def _session_words(ctx) -> WordCompleter:
     ids = [s["id"] for s in session_mod.list_sessions(ctx.cwd, ctx.bookmark_root)]
-    return WordCompleter(ids, ignore_case=True)
+    # WORD=True treats the whole dash-separated id (timestamp-title-hash) as one
+    # completable token instead of splitting on '-' as a word boundary.
+    return WordCompleter(ids, ignore_case=True, WORD=True)
 
 
 def build_completer(ctx) -> FuzzyCompleter:
@@ -69,10 +75,29 @@ class Repl_UI:
     def __init__(self, ctx):
         self.ctx = ctx
         self.session = PromptSession(complete_while_typing=True)
+        self.session.default_buffer.on_completions_changed += self._on_completions_changed
+
+    def _on_completions_changed(self, buf) -> None:
+        """Live-toggle the terminal's actual mouse-reporting mode based on
+        whether a completion dropdown is currently showing. Only active in
+        "auto" mode — /mouse on|off bypasses this entirely."""
+        if self.ctx.mouse_mode != "auto":
+            return
+        try:
+            output = get_app().output
+        except Exception:
+            return
+        if buf.complete_state is not None:
+            output.enable_mouse_support()
+        else:
+            output.disable_mouse_support()
 
     def prompt(self, message: str = "> ") -> str:
         # Rebuild the completer each call since available models/sessions can
-        # change between turns (e.g. after /session new). mouse_support is
-        # re-read each call too, since /mouse on|off toggles it live.
+        # change between turns (e.g. after /session new).
         self.session.completer = build_completer(self.ctx)
-        return self.session.prompt(message, mouse_support=self.ctx.mouse_enabled)
+        # Baseline mouse state for the whole prompt() call: off in "auto" (the
+        # completions-changed hook turns it on only while a dropdown is open),
+        # matching whichever fixed choice the user picked otherwise.
+        base_mouse_support = self.ctx.mouse_mode == "on"
+        return self.session.prompt(message, mouse_support=base_mouse_support)

@@ -190,6 +190,18 @@ def _write_markdown_mirror(session: Session, md_path: Path) -> None:
     os.replace(tmp_path, md_path)
 
 
+def format_transcript(session: Session) -> str:
+    """Plain-text rendering of a session's messages, for reprinting to the
+    console when switching into an existing session (so past context is
+    visible again, not just silently loaded in the background)."""
+    if not session.messages:
+        return ""
+    lines = []
+    for msg in session.messages:
+        lines.append(f"[{msg['role']}] {msg['content']}")
+    return "\n\n".join(lines)
+
+
 def delete_session(path: str) -> None:
     p = Path(path)
     p.unlink(missing_ok=True)

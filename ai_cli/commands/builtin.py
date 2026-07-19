@@ -74,7 +74,9 @@ def cmd_session(ctx, args: str) -> str:
         for s in session_mod.list_sessions(ctx.cwd, ctx.bookmark_root):
             if s["id"] == rest.strip() or s["id"].startswith(rest.strip()):
                 ctx.session = session_mod.load_session(s["path"])
-                return f"Switched to session {ctx.session.id}"
+                header = f"Switched to session {ctx.session.id} ({ctx.session.title})"
+                transcript = session_mod.format_transcript(ctx.session)
+                return f"{header}\n\n{transcript}" if transcript else f"{header}\n(no messages yet)"
         return f"No in-scope session matching '{rest}'"
 
     if sub == "rm":
@@ -122,16 +124,19 @@ def cmd_memory(ctx, args: str) -> str:
 
 
 def cmd_mouse(ctx, args: str) -> str:
-    """Toggle touch-tap completion selection vs. terminal scrollback (can't have
-    both at once — mouse mode captures scroll gestures). Usage: /mouse on|off"""
+    """Control touch-tap completion selection vs. terminal scrollback. Usage: /mouse auto|on|off"""
     choice = args.strip().lower()
-    if choice not in ("on", "off"):
-        state = "on" if ctx.mouse_enabled else "off"
-        return f"Usage: /mouse on|off (currently {state})"
-    ctx.mouse_enabled = choice == "on"
-    if ctx.mouse_enabled:
-        return "Mouse mode on: tap to select completions; scrollback won't work until you turn it off."
-    return "Mouse mode off: scrollback restored; use arrow keys to select completions."
+    if choice not in ("auto", "on", "off"):
+        return f"Usage: /mouse auto|on|off (currently {ctx.mouse_mode})"
+    ctx.mouse_mode = choice
+    if choice == "auto":
+        return (
+            "Mouse mode: auto — scrollback works while typing; tap-to-select "
+            "turns on automatically only while a dropdown is showing."
+        )
+    if choice == "on":
+        return "Mouse mode: on — tap to select completions; scrollback won't work until you switch modes."
+    return "Mouse mode: off — scrollback works everywhere; use arrow keys to select completions."
 
 
 def cmd_exit(ctx, args: str) -> str:

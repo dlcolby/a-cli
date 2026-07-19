@@ -64,6 +64,24 @@ def test_global_session_visible_everywhere(tmp_path):
     assert s.id in from_root
 
 
+def test_format_transcript_empty(tmp_path):
+    bookmark = tmp_path / "bookmark"
+    bookmark.mkdir()
+    s = session_mod.create_session(bookmark, bookmark, "anthropic", "sonnet", global_scope=True)
+    assert session_mod.format_transcript(s) == ""
+
+
+def test_format_transcript_includes_all_messages(tmp_path):
+    bookmark = tmp_path / "bookmark"
+    bookmark.mkdir()
+    s = session_mod.create_session(bookmark, bookmark, "anthropic", "sonnet", global_scope=True)
+    s.messages.append({"role": "user", "content": "hi"})
+    s.messages.append({"role": "assistant", "content": "hello!"})
+    text = session_mod.format_transcript(s)
+    assert "[user] hi" in text
+    assert "[assistant] hello!" in text
+
+
 def test_save_and_load_roundtrip(tmp_path):
     bookmark = tmp_path / "bookmark"
     bookmark.mkdir()
