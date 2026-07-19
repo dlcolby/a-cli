@@ -14,6 +14,13 @@ PROVIDERS = {
     "openai": OpenAIProvider,
 }
 
+# A small/cheap model per provider, used for low-stakes auxiliary tasks like
+# proposing a session title — not meant to be user-facing as a "real" model choice.
+CHEAP_MODEL_BY_PROVIDER = {
+    "anthropic": "haiku",
+    "openai": "gpt5-mini",
+}
+
 
 def create_provider(name: str, api_key: str, base_url: Optional[str] = None) -> Provider:
     try:

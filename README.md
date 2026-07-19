@@ -49,7 +49,7 @@ Point both tools at the same synced folder (OneDrive, iCloud Drive, Syncthing �
    sh bootstrap.sh
    ```
 
-3. **(Optional) Bookmark your shared folder.** If you want skills/memory/sessions shared with a PC tool like OpenCode, use a-shell's `pickFolder` command to bookmark the OneDrive/iCloud folder you want to use before continuing, so you know its path.
+3. **(Optional) Set up your shared folder.** If you want skills/memory/sessions shared with a PC tool like OpenCode, use a-shell's `pickFolder` command to bookmark an **iCloud Drive** folder before continuing — `pickFolder` works cleanly for iCloud Drive. **OneDrive folders currently can't be selected this way**: OneDrive shows up as a location in the picker, but its folders never become selectable (a limitation of OneDrive's iOS Files-provider extension, not something fixable from a-shell). If you're committed to OneDrive, use a plain local a-shell folder as your workflow folder for now, and manually copy files in/out via the OneDrive app's "Save a copy"/"Export" — not automatic sync, but functional today. Direct OneDrive support without this limitation (via Microsoft's Graph API instead of the Files picker) is a planned but not-yet-built improvement.
 
 4. **Run it:**
 
@@ -66,10 +66,12 @@ Point both tools at the same synced folder (OneDrive, iCloud Drive, Syncthing �
 ## Usage
 
 - Plain text sent at the prompt is a normal chat turn.
-- `/model [provider:alias]` — show or switch the active model (e.g. `/model openai:gpt5`).
-- `/session list|new [--global] [title]|switch <id>|rm <id>` — manage sessions. Without `--global`, a new session is scoped to the nearest project folder (one containing an `AGENTS.md`, `.opencode/`, or existing `mobile_sessions/`); with `--global`, it's visible from anywhere under your shared folder.
+- The first exchange in a new session gets an automatic short title, proposed by a cheap/fast model (Haiku for Anthropic, GPT-5 mini for OpenAI) rather than whatever model you're actually chatting with — you'll see `[session auto-named: "..."]` after the first reply. Rename it any time with `/session rename <title>` (the session's timestamp-based id never changes).
+- `/model [provider:alias]` — show or switch the active model (e.g. `/model openai:gpt5`), or `/model refresh` to re-query the live model list (see below). The `/model` dropdown only lists models for providers you've actually configured a key for, queried live from that provider's API — not a fixed guess — so it reflects what your key can actually access.
+- `/session list|new [--global] [title]|switch <id>|rm <id>|rename <title>` — manage sessions. Without `--global`, a new session is scoped to the nearest project folder (one containing an `AGENTS.md`, `.opencode/`, or existing `mobile_sessions/`); with `--global`, it's visible from anywhere under your shared folder.
 - `/skills` — list discovered skills.
 - `/memory [append <text>]` — show loaded memory files, or quickly jot a note into the current project's `AGENTS.md`.
+- `/mouse on|off` — toggle touch-tap completion selection vs. terminal scrollback. Both use the same underlying mouse-tracking mode, so only one works at a time: leave it on to tap-select from dropdowns, turn it off when you need to scroll back through chat history.
 - `/exit` — save and quit.
 - Any `.opencode/commands/<name>.md` file in your shared folder becomes available as `/<name>` automatically.
 
@@ -99,10 +101,14 @@ pytest
 
 ## Status / known limitations
 
-This project is under active development and has not yet been fully exercised on-device. A few things are believed to work but aren't yet confirmed in real a-shell use:
+This project is under active development. Confirmed working on-device (real iPhone, real a-shell):
 
-- HTTPS networking (including streamed responses) from a-shell's Python interpreter.
-- `prompt_toolkit`'s completion menus rendering correctly, and specifically whether a-shell's terminal forwards finger taps as mouse-click events for touch-selecting a completion (falling back to keyboard arrow-key selection if not).
-- OneDrive's on-demand "placeholder file" behavior when read from Python — whether a file edited on PC is immediately readable on the phone or needs to be explicitly downloaded first.
+- HTTPS networking from a-shell's Python interpreter, including genuinely incremental streamed responses (not buffered).
+- `prompt_toolkit`'s completion dropdowns, including tapping a specific item out of several visible candidates to select it.
 
-If you run into rough edges around any of these, that's expected at this stage — issues and reports are welcome.
+Known, currently unresolved:
+
+- **OneDrive folders can't be selected via `pickFolder`** — see the installation section above. iCloud Drive works; OneDrive doesn't expose folder-level picking to other apps on iOS. Workaround: a local folder + manual "Save a copy"/"Export" for now. Real fix (Microsoft Graph API integration) is planned but not built.
+- **Touch-select and terminal scrollback are mutually exclusive** — both rely on the same mouse-tracking terminal mode, so `/mouse on|off` lets you switch between them rather than having both simultaneously.
+
+If you run into other rough edges, that's expected at this stage — issues and reports are welcome.

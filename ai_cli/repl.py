@@ -11,12 +11,12 @@ from pathlib import Path
 from typing import Optional
 
 from . import config as config_mod
-from . import memory, session as session_mod, skills as skills_mod, ui
+from . import memory, naming, session as session_mod, skills as skills_mod, ui
 from .commands import loader as command_loader
 from .commands.markdown_command import discover_commands
 from .context import AppContext
 from .providers.base import Message, ToolCall
-from .providers.registry import create_provider
+from .providers.registry import CHEAP_MODEL_BY_PROVIDER, create_provider
 from .skills import READ_SKILL_TOOL
 
 MAX_TOOL_ROUNDS = 4  # generous ceiling against a runaway read_skill loop
@@ -77,6 +77,7 @@ def send_turn(ctx: AppContext, user_text: str, override_model: Optional[str] = N
     if ctx.session is None:
         ctx.session = session_mod.create_session(ctx.cwd, ctx.bookmark_root, ctx.provider_name, ctx.model)
 
+    was_first_exchange = len(ctx.session.messages) == 0
     ctx.session.messages.append({"role": "user", "content": user_text})
     model = override_model or ctx.model
     tools = [READ_SKILL_TOOL] if ctx.skills else None
@@ -117,6 +118,18 @@ def send_turn(ctx: AppContext, user_text: str, override_model: Optional[str] = N
             )
     else:
         print("\n[warning] tool-call loop hit its round limit; stopping]")
+
+    if was_first_exchange and ctx.session.title == "untitled":
+        try:
+            cheap_model = CHEAP_MODEL_BY_PROVIDER.get(ctx.provider_name, model)
+            assistant_reply = next(
+                (m["content"] for m in reversed(ctx.session.messages) if m["role"] == "assistant"), ""
+            )
+            title = naming.suggest_title(ctx.provider, cheap_model, user_text, assistant_reply)
+            ctx.session.title = title
+            print(f'[session auto-named: "{title}" — /session rename to change it]')
+        except Exception:
+            pass  # naming is best-effort; never let it break the chat turn
 
     session_mod.save_session(ctx.session)
 

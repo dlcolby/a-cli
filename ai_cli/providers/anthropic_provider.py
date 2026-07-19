@@ -28,6 +28,17 @@ class AnthropicProvider(Provider):
         super().__init__(api_key, base_url or DEFAULT_BASE_URL)
 
     def list_models(self) -> list[ModelInfo]:
+        """Live-query the models actually available to this API key, rather than
+        a fixed guess — falls back to the curated aliases if the call fails
+        (e.g. offline, invalid key)."""
+        try:
+            resp = requests.get(f"{self.base_url}/v1/models", headers=self._headers(), timeout=15)
+            resp.raise_for_status()
+            data = resp.json().get("data", [])
+            if data:
+                return [ModelInfo(alias=m["id"], model_id=m["id"]) for m in data]
+        except requests.RequestException:
+            pass
         return [ModelInfo(alias=alias, model_id=model_id) for alias, model_id in MODEL_ALIASES.items()]
 
     def resolve_model(self, alias_or_id: str) -> str:

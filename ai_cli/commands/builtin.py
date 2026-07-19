@@ -21,9 +21,12 @@ def cmd_help(ctx, args: str) -> str:
 
 
 def cmd_model(ctx, args: str) -> str:
-    """Show or switch the active model. Usage: /model [provider:model-or-alias]"""
+    """Show or switch the active model. Usage: /model [provider:model-or-alias] | /model refresh"""
     if not args.strip():
         return f"Current: {ctx.provider_name}:{ctx.model}"
+    if args.strip() == "refresh":
+        ctx.model_cache.clear()
+        return "Model list cache cleared — it'll re-query on next /model dropdown."
     provider_name, model_ref = parse_model_ref(args.strip(), ctx.provider_name)
     if provider_name not in PROVIDERS:
         return f"Unknown provider '{provider_name}'. Available: {', '.join(PROVIDERS)}"
@@ -44,7 +47,7 @@ def cmd_provider(ctx, args: str) -> str:
 
 
 def cmd_session(ctx, args: str) -> str:
-    """Manage sessions. Usage: /session list|new [--global] [title]|switch <id>|rm <id>"""
+    """Manage sessions. Usage: /session list|new [--global] [title]|switch <id>|rm <id>|rename <title>"""
     parts = args.split(maxsplit=1)
     sub = parts[0] if parts else "list"
     rest = parts[1] if len(parts) > 1 else ""
@@ -81,6 +84,16 @@ def cmd_session(ctx, args: str) -> str:
                 return f"Deleted session {s['id']}"
         return f"No in-scope session matching '{rest}'"
 
+    if sub == "rename":
+        if not ctx.session:
+            return "No active session to rename. Start chatting or /session new first."
+        new_title = rest.strip()
+        if not new_title:
+            return "Usage: /session rename <new title>"
+        ctx.session.title = new_title
+        session_mod.save_session(ctx.session)
+        return f"Renamed session to '{new_title}' (id unchanged: {ctx.session.id})"
+
     return f"Unknown /session subcommand '{sub}'"
 
 
@@ -108,6 +121,19 @@ def cmd_memory(ctx, args: str) -> str:
     return block or "No memory files loaded (no AGENTS.md/CLAUDE.md found)."
 
 
+def cmd_mouse(ctx, args: str) -> str:
+    """Toggle touch-tap completion selection vs. terminal scrollback (can't have
+    both at once — mouse mode captures scroll gestures). Usage: /mouse on|off"""
+    choice = args.strip().lower()
+    if choice not in ("on", "off"):
+        state = "on" if ctx.mouse_enabled else "off"
+        return f"Usage: /mouse on|off (currently {state})"
+    ctx.mouse_enabled = choice == "on"
+    if ctx.mouse_enabled:
+        return "Mouse mode on: tap to select completions; scrollback won't work until you turn it off."
+    return "Mouse mode off: scrollback restored; use arrow keys to select completions."
+
+
 def cmd_exit(ctx, args: str) -> str:
     """Save the current session and exit."""
     if ctx.session:
@@ -124,5 +150,6 @@ BUILTINS = {
     "new": cmd_new,
     "skills": cmd_skills,
     "memory": cmd_memory,
+    "mouse": cmd_mouse,
     "exit": cmd_exit,
 }
