@@ -4,16 +4,18 @@ finger (vs. needing the keyboard's arrow keys + return)?
 
 Run: python3 tests/spikes/spike2_ui.py
 
-Type a letter (e.g. "a") to trigger the dropdown showing alpha/beta/gamma,
-then try tapping "alpha" directly. Report back: did the dropdown appear at
-all, and did tapping work or did you need arrow keys?
+Type "alpha" to trigger a dropdown with THREE candidates (alpha1, alpha2,
+alphabeta) still visible at once, confirming multi-item filtering (not just
+single-item auto-complete). Try tapping "alpha2" specifically — the middle
+one — to confirm you can pick a specific item out of several, not just
+whichever one happens to be first/highlighted.
 """
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
 
 session = PromptSession(
-    completer=WordCompleter(["alpha", "beta", "gamma"]),
+    completer=WordCompleter(["alpha1", "alpha2", "alphabeta", "beta1", "beta2", "gamma"]),
     complete_while_typing=True,
     mouse_support=True,
 )
