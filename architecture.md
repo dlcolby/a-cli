@@ -430,6 +430,43 @@ mechanism a-shell uses to run it. Covered by
 `tests/test_agent_tools.py`'s `test_run_command_never_inherits_real_stdin`.
 **Not yet device-confirmed.**
 
+**Separately (2026-07-19): the terminal-crash fixes held up through a much
+longer session, but `bookmark_root` turned out to have been silently
+misresolved this entire time — unrelated to the crash saga above, but the
+actual explanation for most of the "README.md not found"/weird-`pwd`
+confusion that recurred across nearly every device session in this section.**
+`Path()` does **not** expand `"~"` on its own — only `Path.expanduser()`
+does. `build_context()` did `bookmark_root = Path(cfg.bookmark_root)` with
+no `.expanduser()` call, so a `"~"`-typed answer to the first-run "shared
+workflow folder" prompt was treated as a literal relative path segment (a
+directory *named* `"~"`), resolved against whatever directory `aic` happened
+to be launched from. Device evidence: `run_command('pwd')` reported the
+tools' project root as `~/Documents/a-cli/~/Documents/a-cli-workflow` (a
+literal nested/concatenated path), and `ls -la ~/Documents/a-cli/` showed a
+real directory literally named `~` sitting inside the repo. Every session's
+data (including a `write_file('hello.txt', ...)` that appeared to "vanish")
+had actually been going into this bogus nested location the whole time —
+the real, intended `~/Documents/a-cli-workflow` had never once been used;
+checking it directly showed it completely empty. **Fix**: `.expanduser()`
+added at all three places a config-provided path string becomes a `Path`:
+`build_context()`'s `bookmark_root` and `global_commands_dir` (`repl.py`),
+and `Config.assert_secrets_isolated()`'s `bookmark` (`config.py`).
+`session.py`'s own `.resolve()` calls receive an already-expanded `Path` from
+`repl.py`, so no separate fix needed there. Covered by
+`tests/test_config_secrets.py`'s
+`test_assert_secrets_isolated_expands_tilde_before_comparing` and
+`test_build_context_expands_tilde_in_bookmark_root`.
+
+**This does not retroactively fix already-created cruft** — the stray `~`
+directory inside the a-cli repo clone, and whatever ended up in the bogus
+nested path, are filesystem artifacts from before this fix and need manual
+cleanup on-device (`rm -rf ~/Documents/a-cli/~` from the real shell, where
+`~` *does* get expanded correctly by a-shell's own shell). After pulling
+this fix, `bookmark_root` will resolve to the real, previously-untouched
+`~/Documents/a-cli-workflow` for the first time — expect `/session list` to
+show nothing there, since no prior session data ever actually landed in the
+real location.
+
 ## Known issues / open actions
 
 1. **`/mouse auto` mode does not reliably work — OPEN, unresolved after two fix attempts.** Goal: dynamically enable touch-tap completion selection only while a dropdown is visible, and native terminal scrollback the rest of the time (both rely on the same xterm mouse-tracking mode, so can't be on simultaneously).
@@ -443,6 +480,7 @@ mechanism a-shell uses to run it. Covered by
 5. **Terminal-input crash saga, seven device round-trips, converging on `run_command`'s stdin inheritance — OPEN pending device confirmation.** v1-v4 chased a nested-synchronous-read theory for the confirmation prompt specifically; round 5's defer-to-next-turn rewrite then crashed anyway on a plain top-level `prompt()` call with no nesting at all (`EINVAL`), reframing the investigation around `asyncio.run()`-per-call kqueue churn; round 6 held one persistent event loop for the REPL's lifetime, which helped (got through more turns) but round 7 still crashed — this time `EBADF`, correlated with how many `run_command` calls had executed beforehand rather than raw `prompt()` count. Fix (round 7): `run_command` now passes `stdin=subprocess.DEVNULL`, since it was inheriting the real terminal's stdin by default and a-shell's non-standard (fork-less) subprocess implementation plausibly doesn't isolate that as cleanly as real POSIX fork+exec would. All three fixes (defer-to-next-turn, persistent event loop, stdin isolation) are kept regardless of which one(s) turn out to matter — each is independently a reasonable design regardless of this specific bug. Not yet re-tested on a real phone.
 6. **Ordinary chat text triggered a completion dropdown on every keystroke — FIXED, 2026-07-19.** `FuzzyCompleter` matches a single typed character against any top-level command name by subsequence (e.g. "e" fuzzy-matches "/help", "/session", "/memory", ...), and `complete_while_typing=True` meant this fired on nearly every keystroke of plain chat text, not just slash commands. Fixed with `ui._SlashOnlyCompleter`, which only delegates to the real completer when the buffer starts with `/`. Not yet device-confirmed.
 7. **Project detection silently regressed after a fresh clone — FIXED, 2026-07-19.** `PROJECT_MARKERS` didn't include `.git`, only `AGENTS.md`/`CLAUDE.md`/`.opencode`/`mobile_sessions`. When the a-cli repo itself is used as a project under `bookmark_root`, it was only recognized as a project once `mobile_sessions/` already existed there from a prior session — but that dir is gitignored, so a fresh `lg2 clone` lost the marker, project detection silently fell back to "no project," and `read_file`/`write_file`/`run_command` then resolved paths against `bookmark_root` instead of the actual project directory (symptom: the model couldn't find `README.md` even though it existed, and tried to `find` for it — which itself then hit issue #5's confirmation freeze). Fixed by adding `.git` to `PROJECT_MARKERS`, matching OpenCode's own convention and not depending on ephemeral, gitignored state.
+8. **`bookmark_root` never expanded `"~"`, silently corrupting the project root for the entire testing history — FIXED, 2026-07-19, not yet device-confirmed.** See "Separately... `bookmark_root` turned out to have been silently misresolved" above. `.expanduser()` added at all three sites a config path string becomes a `Path`. Retroactive cruft (a literal `~` directory inside the a-cli repo clone) needs manual on-device cleanup — the code fix doesn't undo it. Expect session history to appear empty after this lands, since the real `bookmark_root` had never actually been used before.
 
 ## Verification approach
 

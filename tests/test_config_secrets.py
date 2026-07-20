@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from ai_cli import config as config_mod
+from ai_cli import config as config_mod, repl
 
 
 @pytest.fixture
@@ -40,3 +40,45 @@ def test_assert_secrets_isolated_passes_for_unrelated_bookmark(local_home, tmp_p
     bookmark.mkdir()
     cfg = config_mod.Config(bookmark_root=str(bookmark))
     cfg.assert_secrets_isolated()  # should not raise
+
+
+def _set_home(monkeypatch, home_path) -> None:
+    # Path.expanduser() consults $HOME on POSIX and %USERPROFILE% on
+    # Windows -- set both so this test behaves the same regardless of which
+    # platform it runs on (production is POSIX/a-shell; this dev box may be
+    # Windows).
+    monkeypatch.setenv("HOME", str(home_path))
+    monkeypatch.setenv("USERPROFILE", str(home_path))
+
+
+def test_assert_secrets_isolated_expands_tilde_before_comparing(local_home, monkeypatch):
+    # Regression: Path() does NOT expand "~" on its own -- a device report
+    # showed a "~"-prefixed bookmark_root being treated as a literal
+    # relative path segment instead of the home directory, producing a
+    # bogus nested project root and a real directory literally named "~"
+    # inside the repo it happened to be launched from. If bookmark_root is
+    # entered as "~/<something>" and never expanded, this guard would
+    # compare against that literal (relative, cwd-dependent) path instead
+    # of the real location -- silently failing to catch a genuine collision
+    # with secrets. Rig HOME so "~/<local_home's name>" expands to exactly
+    # where secrets.json lives, and confirm the guard actually catches it.
+    _set_home(monkeypatch, local_home.parent)
+    cfg = config_mod.Config(bookmark_root=f"~/{local_home.name}")
+    with pytest.raises(RuntimeError):
+        cfg.assert_secrets_isolated()
+
+
+def test_build_context_expands_tilde_in_bookmark_root(local_home, monkeypatch, tmp_path):
+    # Same bug, exercised through the actual first-run path: build_context()
+    # is what a real "~"-typed answer to "Enter the path to your shared
+    # workflow folder" flows through.
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    _set_home(monkeypatch, fake_home)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
+    config_mod.Config(bookmark_root="~/workflow").save()
+
+    ctx = repl.build_context(fake_home, None, None)
+
+    assert ctx.bookmark_root == fake_home / "workflow"
+    assert not (tmp_path / "~").exists()  # must never create a literal "~" dir as a side effect

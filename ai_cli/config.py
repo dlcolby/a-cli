@@ -72,7 +72,7 @@ class Config:
         """Guard against secrets ever living inside the synced bookmark tree."""
         if not self.bookmark_root:
             return
-        bookmark = Path(self.bookmark_root).resolve()
+        bookmark = Path(self.bookmark_root).expanduser().resolve()
         secrets = secrets_path().resolve()
         if bookmark == secrets or bookmark in secrets.parents:
             raise RuntimeError(

@@ -34,7 +34,15 @@ def build_context(cwd: Path, provider_override: Optional[str], model_override: O
         cfg.bookmark_root = path
         cfg.save()
 
-    bookmark_root = Path(cfg.bookmark_root)
+    # expanduser() is required here: Path() does NOT expand "~" on its own --
+    # without it, a user-typed "~/Documents/foo" is treated as a literal
+    # relative path segment (a directory named "~"), resolved against
+    # whatever cwd happens to be when aic is launched. Device report,
+    # 2026-07-19: this produced a real "~" directory inside the a-cli repo
+    # itself and a bogus nested project root
+    # (~/Documents/a-cli/~/Documents/a-cli-workflow) that every prior test
+    # session's data silently went into instead of the intended folder.
+    bookmark_root = Path(cfg.bookmark_root).expanduser()
     bookmark_root.mkdir(parents=True, exist_ok=True)
 
     provider_name = provider_override or cfg.default_provider
@@ -51,7 +59,9 @@ def build_context(cwd: Path, provider_override: Optional[str], model_override: O
 
     project_dir = session_mod.find_project_dir(cwd, bookmark_root)
     skills = skills_mod.discover_skills(bookmark_root, project_dir)
-    global_commands_dir = Path(cfg.global_workflow_dir) / ".opencode" / "commands" if cfg.global_workflow_dir else None
+    global_commands_dir = (
+        Path(cfg.global_workflow_dir).expanduser() / ".opencode" / "commands" if cfg.global_workflow_dir else None
+    )
     markdown_commands = discover_commands(bookmark_root, project_dir, global_commands_dir)
 
     return AppContext(
